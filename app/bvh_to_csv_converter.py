@@ -101,6 +101,10 @@ class Viewer:
             from newton._src.viewer.gl.opengl import MeshInstancerGL
             for key in [k for k, v in self.viewer.objects.items() if isinstance(v, MeshInstancerGL)]:
                 del self.viewer.objects[key]
+        # Only set at construction time otherwise; without this the new
+        # instancers never receive colors/materials and render black.
+        if hasattr(self.viewer, 'model_changed'):
+            self.viewer.model_changed = True
 
         self.viewer.set_model(self.model)
         self.viewer.set_world_offsets([0, 0, 0])
