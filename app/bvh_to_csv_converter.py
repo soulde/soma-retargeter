@@ -49,7 +49,7 @@ class Viewer:
         self.playback_total_time = 0.0
 
         self.retarget_source_options = ['soma']
-        self.retarget_target_options = ['unitree_g1']
+        self.retarget_target_options = ['unitree_g1', 'dr02', 'chocolate']
         self.retarget_solver_options = ['Newton']
         self.retarget_solver_idx     = 0
         self.retarget_target_idx     = 0
@@ -63,25 +63,12 @@ class Viewer:
         self.viewer.renderer.set_title("BVH to CSV Converter")
         self.viewer.register_ui_callback(lambda ui: self.gui(ui), position="free")
 
-        g1_builder = newton.ModelBuilder()
-        g1_builder.add_mjcf(
-            newton.utils.download_asset("unitree_g1") / "mjcf/g1_29dof_rev_1_0.xml")
-        
+        if self.config['retarget_target'] in self.retarget_target_options:
+            self.retarget_target_idx = self.retarget_target_options.index(self.config['retarget_target'])
+
         self.num_robots = 1
         self.robot_offsets = [wp.transform(wp.vec3(0.0, i - (self.num_robots - 1) / 2.0, 0.0), wp.quat_identity()) for i in range(self.num_robots)]
-        builder = newton.ModelBuilder()
-        builder.add_ground_plane()
-        for _ in range(self.num_robots):
-            builder.add_builder(g1_builder, wp.transform_identity())
-        self.model = builder.finalize()
-
-        self.viewer.set_model(self.model)
-        self.viewer.set_world_offsets([0, 0, 0])
-        self.state = self.model.state()
-
-        self.g1_num_joint_q = self.model.joint_coord_count // self.model.articulation_count
-        self.g1_joint_q_offsets = [int(i * self.g1_num_joint_q) for i in range(self.model.articulation_count)]
-        self.g1_default_joint_q_values = self.model.joint_q.numpy()
+        self.build_robot_model(self.retarget_target_options[self.retarget_target_idx])
 
         self.coordinate_renderer = CoordinateRenderer()
         self.skeleton = None
@@ -93,12 +80,43 @@ class Viewer:
         self.skeleton_instances = []
         self.robot_csv_animation_buffers = [None for _ in range(self.num_robots)]
 
+    def build_robot_model(self, retarget_target: str):
+        """Build the Newton preview model for the given target robot and push it to the viewer."""
+        robot_target = pipeline_utils.get_target_type_from_str(retarget_target)
+        robot_builder = newton.ModelBuilder()
+        robot_builder.add_mjcf(str(pipeline_utils.get_robot_mjcf_path(robot_target)))
+
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        for _ in range(self.num_robots):
+            builder.add_builder(robot_builder, wp.transform_identity())
+        self.model = builder.finalize()
+
+        # The viewer's set_model() only accepts a single call; reset its internal
+        # model state (and stale GL shape instancers) so the robot can be swapped.
+        self.viewer.model = None
+        if hasattr(self.viewer, '_shape_instances'):
+            self.viewer._shape_instances.clear()
+        if hasattr(self.viewer, 'objects'):
+            from newton._src.viewer.gl.opengl import MeshInstancerGL
+            for key in [k for k, v in self.viewer.objects.items() if isinstance(v, MeshInstancerGL)]:
+                del self.viewer.objects[key]
+
+        self.viewer.set_model(self.model)
+        self.viewer.set_world_offsets([0, 0, 0])
+        self.state = self.model.state()
+
+        self.g1_num_joint_q = self.model.joint_coord_count // self.model.articulation_count
+        self.g1_joint_q_offsets = [int(i * self.g1_num_joint_q) for i in range(self.model.articulation_count)]
+        self.g1_default_joint_q_values = self.model.joint_q.numpy()
+
     def gui(self, ui):
         self.ui_playback_controls(ui)
         self.ui_scene_options(ui)
 
     def load_csv_file(self, path):
-        self.robot_csv_animation_buffers[0] = csv_utils.load_csv(path)
+        self.robot_csv_animation_buffers[0] = csv_utils.load_csv(
+            path, csv_config=csv_utils.get_csv_config_for_target(self.retarget_target_options[self.retarget_target_idx]))
         self.compute_playback_total_time()
 
     def load_bvh_file(self, path):
@@ -320,10 +338,21 @@ class Viewer:
                     defaultextension=".csv",
                     filetypes=[("CSV files", "*.csv")])
                 if save_path:
-                    csv_utils.save_csv(save_path, self.robot_csv_animation_buffers[0])
+                    csv_utils.save_csv(save_path, self.robot_csv_animation_buffers[0],
+                        csv_utils.get_csv_config_for_target(self.retarget_target_options[self.retarget_target_idx]))
 
             if self.robot_csv_animation_buffers[0] is None:
                 ui.end_disabled()
+
+            # Retarget target selection
+            ui.align_text_to_frame_padding()
+            ui.text("Retarget Target:")
+            ui.same_line()
+            ui.set_next_item_width(150)
+            changed, self.retarget_target_idx = ui.combo("##RetargetTarget", self.retarget_target_idx, self.retarget_target_options)
+            if changed:
+                self.robot_csv_animation_buffers = [None for _ in range(self.num_robots)]
+                self.build_robot_model(self.retarget_target_options[self.retarget_target_idx])
 
         # Visibility options
         ui.spacing()
@@ -465,7 +494,8 @@ class Viewer:
                     csv_buffer = csv_buffers[i]
                     dst_path = export_path / pathlib.Path(batch[i]).relative_to(import_path).with_suffix(".csv")
                     dst_path.parent.mkdir(parents=True, exist_ok=True)
-                    csv_utils.save_csv(dst_path, csv_buffer)
+                    csv_utils.save_csv(dst_path, csv_buffer,
+                        csv_utils.get_csv_config_for_target(retarget_target))
 
             nb_retargeted_motions += len(batch)
 

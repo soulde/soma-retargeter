@@ -83,6 +83,81 @@ class UnitreeG129DOF_CSVConfig:
         return row
 
 
+@dataclass
+class DR0229DOF_CSVConfig:
+    name: str = "dr02_29dof"
+    csv_header: ClassVar[List[str]] = [
+        "Frame",
+        "root_translateX", "root_translateY", "root_translateZ",
+        "root_rotateX", "root_rotateY", "root_rotateZ",
+        "waist_z_joint_dof", "waist_x_joint_dof", "waist_y_joint_dof",
+        "left_shoulder_y_joint_dof", "left_shoulder_x_joint_dof", "left_shoulder_z_joint_dof",
+        "left_elbow_joint_dof",
+        "left_wrist_z_joint_dof", "left_wrist_y_joint_dof", "left_wrist_x_joint_dof",
+        "right_shoulder_y_joint_dof", "right_shoulder_x_joint_dof", "right_shoulder_z_joint_dof",
+        "right_elbow_joint_dof",
+        "right_wrist_z_joint_dof", "right_wrist_y_joint_dof", "right_wrist_x_joint_dof",
+        "left_hip_y_joint_dof", "left_hip_x_joint_dof", "left_hip_z_joint_dof",
+        "left_knee_joint_dof", "left_ankle_y_joint_dof", "left_ankle_x_joint_dof",
+        "right_hip_y_joint_dof", "right_hip_x_joint_dof", "right_hip_z_joint_dof",
+        "right_knee_joint_dof", "right_ankle_y_joint_dof", "right_ankle_x_joint_dof"]
+
+    def to_anim_frame(self, csv_row: np.ndarray) -> np.ndarray:
+        return UnitreeG129DOF_CSVConfig.to_anim_frame(self, csv_row)
+
+    def to_csv_row(self, frame_idx: int, anim_row: np.ndarray) -> List[float]:
+        return UnitreeG129DOF_CSVConfig.to_csv_row(self, frame_idx, anim_row)
+
+
+@dataclass
+class Chocolate23DOF_CSVConfig:
+    name: str = "chocolate_23dof"
+    csv_header: ClassVar[List[str]] = [
+        "Frame",
+        "root_translateX", "root_translateY", "root_translateZ",
+        "root_rotateX", "root_rotateY", "root_rotateZ",
+        "waist_pitch_joint_dof", "waist_roll_joint_dof", "waist_yaw_joint_dof",
+        "left_hip_pitch_joint_dof", "left_hip_roll_joint_dof", "left_hip_yaw_joint_dof",
+        "left_knee_joint_dof", "left_ankle_pitch_joint_dof", "left_ankle_roll_joint_dof",
+        "right_hip_pitch_joint_dof", "right_hip_roll_joint_dof", "right_hip_yaw_joint_dof",
+        "right_knee_joint_dof", "right_ankle_pitch_joint_dof", "right_ankle_roll_joint_dof",
+        "left_shoulder_pitch_joint_dof", "left_shoulder_roll_joint_dof",
+        "left_shoulder_yaw_joint_dof", "left_elbow_joint_dof",
+        "right_shoulder_pitch_joint_dof", "right_shoulder_roll_joint_dof",
+        "right_shoulder_yaw_joint_dof", "right_elbow_joint_dof"]
+
+    def to_anim_frame(self, csv_row: np.ndarray) -> np.ndarray:
+        return UnitreeG129DOF_CSVConfig.to_anim_frame(self, csv_row)
+
+    def to_csv_row(self, frame_idx: int, anim_row: np.ndarray) -> List[float]:
+        return UnitreeG129DOF_CSVConfig.to_csv_row(self, frame_idx, anim_row)
+
+
+def get_csv_config_for_target(robot_type: str) -> RobotCSVConfig:
+    """
+    Select the CSV export configuration for a given target robot type.
+
+    Args:
+        robot_type (str): Target robot type name (e.g. "unitree_g1", "dr02", "chocolate").
+
+    Returns:
+        RobotCSVConfig: The CSV configuration matching the target robot.
+
+    Raises:
+        ValueError: If the target robot type is not supported.
+    """
+    configs = {
+        "unitree_g1": UnitreeG129DOF_CSVConfig(),
+        "dr02": DR0229DOF_CSVConfig(),
+        "chocolate": Chocolate23DOF_CSVConfig(),
+    }
+    try:
+        return configs[robot_type]
+    except KeyError:
+        allowed = ", ".join(configs.keys())
+        raise ValueError(f"Unknown robot type: [{robot_type}]. Allowed values are: {allowed}") from None
+
+
 def load_csv(file_path: str, fps: float = 120.0, csv_config: RobotCSVConfig = UnitreeG129DOF_CSVConfig()) -> CSVAnimationBuffer:
     """
     Load a robot motion CSV file into a ``CSVAnimationBuffer``.

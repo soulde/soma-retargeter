@@ -42,7 +42,7 @@ class NewtonPipeline:
         Args:
             skeleton: Common skeleton definition used by the input clips to be retargeted.
             source_type: Source skeleton type name. Currently only "soma" is supported.
-            robot_type: Target robot type name. Currently only "unitree_g1" is supported.
+            robot_type: Target robot type name ("unitree_g1", "dr02" or "chocolate").
             retarget_config: Optional configuration dictionary. If None, a
                 configuration is loaded from disk based on the source/target
                 types.
@@ -69,10 +69,13 @@ class NewtonPipeline:
         self.smooth_joint_filter_coord_masks = None
         self.joint_limit_clamper = None
 
-        if (self.target_type == pipeline_utils.TargetType.UNITREE_G1):
+        if self.target_type in (
+                pipeline_utils.TargetType.UNITREE_G1,
+                pipeline_utils.TargetType.DR02,
+                pipeline_utils.TargetType.CHOCOLATE):
             self.robot_builder = newton.ModelBuilder()
             self.robot_builder.add_mjcf(
-                newton.utils.download_asset("unitree_g1") / "mjcf/g1_29dof_rev_1_0.xml")
+                str(pipeline_utils.get_robot_mjcf_path(self.target_type)))
 
             self.human_robot_scaler = HumanToRobotScaler(
                 skeleton, retargeter_config['model_height'], io_utils.get_config_file(retargeter_config['human_robot_scaler_config']))

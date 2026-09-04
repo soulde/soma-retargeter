@@ -15,6 +15,8 @@ class SourceType(IntEnum):
 class TargetType(IntEnum):
     """Enumeration of supported target model types."""
     UNITREE_G1 = auto()
+    DR02 = auto()
+    CHOCOLATE = auto()
 
 _SOURCE_TYPE_TO_STR = {
     SourceType.SOMA : "soma"
@@ -22,7 +24,9 @@ _SOURCE_TYPE_TO_STR = {
 _STR_TO_SOURCE_TYPE = {s : t for t, s in _SOURCE_TYPE_TO_STR.items()}
 
 _TARGET_TYPE_TO_STR = {
-    TargetType.UNITREE_G1 : "unitree_g1"
+    TargetType.UNITREE_G1 : "unitree_g1",
+    TargetType.DR02 : "dr02",
+    TargetType.CHOCOLATE : "chocolate",
 }
 _STR_TO_TARGET_TYPE = {s : t for t, s in _TARGET_TYPE_TO_STR.items()}
 
@@ -131,14 +135,49 @@ def get_retargeter_config(source: SourceType, target: TargetType) -> dict:
     Raises:
         ValueError: If the source or target type is not supported.
     """
-    if target != TargetType.UNITREE_G1:
+    if target == TargetType.UNITREE_G1:
+        robot_dir = 'unitree_g1'
+        filename = 'soma_to_g1_retargeter_config.json'
+    elif target == TargetType.DR02:
+        robot_dir = 'dr02'
+        filename = 'soma_to_dr02_retargeter_config.json'
+    elif target == TargetType.CHOCOLATE:
+        robot_dir = 'chocolate'
+        filename = 'soma_to_chocolate_retargeter_config.json'
+    else:
         raise ValueError(f"Unknown target type [{target}].")
 
-    if source == SourceType.SOMA:
-        filename = 'soma_to_g1_retargeter_config.json'
-    else:
+    if source != SourceType.SOMA:
         raise ValueError(f"Unknown source type [{source}] for target [{target}].")
 
     return io_utils.load_json(
-        io_utils.get_config_file('unitree_g1', filename)
+        io_utils.get_config_file(robot_dir, filename)
     )
+
+
+def get_robot_mjcf_path(target: TargetType):
+    """
+    Retrieve the MJCF model path for a given target robot.
+
+    The Unitree G1 model is downloaded from the Newton asset server, while the
+    remaining robots ship their MJCF and meshes inside this package.
+
+    Args:
+        target (TargetType): The target robot type.
+
+    Returns:
+        Path to the robot MJCF file (str for downloaded Newton assets).
+
+    Raises:
+        ValueError: If the target robot type is not supported.
+    """
+    import newton
+
+    if target == TargetType.UNITREE_G1:
+        return newton.utils.download_asset("unitree_g1") / "mjcf/g1_29dof_rev_1_0.xml"
+    if target == TargetType.DR02:
+        return io_utils.get_config_file('dr02', 'mjcf/dr02_robot.xml')
+    if target == TargetType.CHOCOLATE:
+        return io_utils.get_config_file('chocolate', 'mjcf/chocolate_robot.xml')
+
+    raise ValueError(f"Unknown target type [{target}].")
