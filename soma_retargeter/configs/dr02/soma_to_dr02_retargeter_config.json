@@ -28,8 +28,8 @@
     "Chest": {
       "t_body": "body",
       "r_body": "body",
-      "t_weight": 0.7,
-      "r_weight": 0.7
+      "t_weight": 2.0,
+      "r_weight": 2.0
     },
     "LeftArm": {
       "t_body": "left_shoulder_y_link",
