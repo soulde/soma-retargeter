@@ -78,7 +78,7 @@ class NewtonPipeline:
                 str(pipeline_utils.get_robot_mjcf_path(self.target_type)))
 
             self.human_robot_scaler = HumanToRobotScaler(
-                skeleton, retargeter_config['model_height'], io_utils.get_config_file(retargeter_config['human_robot_scaler_config']))
+                skeleton, retargeter_config['model_height'], pipeline_utils.resolve_config_path(retargeter_config['human_robot_scaler_config']))
 
             self.num_body_count = self.robot_builder.body_count
             self.num_dofs = self.robot_builder.joint_dof_count
@@ -105,14 +105,14 @@ class NewtonPipeline:
                 self.mapped_joints.index("LeftFoot"),
                 self.mapped_joints.index("RightFoot")]
 
-            self.feet_stabilizer = FeetStabilizer(io_utils.get_config_file(retargeter_config['feet_stabilizer_config']))
+            self.feet_stabilizer = FeetStabilizer(pipeline_utils.resolve_config_path(retargeter_config['feet_stabilizer_config']))
             self.joint_limit_clamper = JointLimitClamper(self.ik_model)
 
             self.initialization_pose = None
             self.num_initialization_frames = 0
             self.num_stabilization_frames = 0
             if (retargeter_config['initialization_pose']):
-                init_skel, init_anim = bvh_utils.load_bvh(io_utils.get_config_file(retargeter_config['initialization_pose']))
+                init_skel, init_anim = bvh_utils.load_bvh(pipeline_utils.resolve_config_path(retargeter_config['initialization_pose']))
                 self.initialization_pose = SkeletonInstance(init_skel, [0, 0, 0], wp.transform_identity())
                 self.initialization_pose.set_local_transforms(init_anim.get_local_transforms(0))
                 self.num_initialization_frames = retargeter_config.get('num_initialization_frames', _DEFAULT_NUM_INITIALIZATION_FRAMES)

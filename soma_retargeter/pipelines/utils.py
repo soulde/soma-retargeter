@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from enum import IntEnum, auto
+import os
 
 import soma_retargeter.utils.io_utils as io_utils
 import soma_retargeter.assets.usd as usd_utils
@@ -136,23 +137,54 @@ def get_retargeter_config(source: SourceType, target: TargetType) -> dict:
         ValueError: If the source or target type is not supported.
     """
     if target == TargetType.UNITREE_G1:
-        robot_dir = 'unitree_g1'
-        filename = 'soma_to_g1_retargeter_config.json'
+        relative = 'unitree_g1/soma_to_g1_retargeter_config.json'
     elif target == TargetType.DR02:
-        robot_dir = 'dr02'
-        filename = 'soma_to_dr02_retargeter_config.json'
+        relative = 'dr02/soma_to_dr02_retargeter_config.json'
     elif target == TargetType.CHOCOLATE:
-        robot_dir = 'chocolate'
-        filename = 'soma_to_chocolate_retargeter_config.json'
+        relative = 'chocolate/soma_to_chocolate_retargeter_config.json'
     else:
         raise ValueError(f"Unknown target type [{target}].")
 
     if source != SourceType.SOMA:
         raise ValueError(f"Unknown source type [{source}] for target [{target}].")
 
-    return io_utils.load_json(
-        io_utils.get_config_file(robot_dir, filename)
-    )
+    return io_utils.load_json(resolve_config_path(relative))
+
+
+# Robots whose assets are not shipped in this repository. Their configs and
+# models live in external packages (e.g. soma-chocolate) exposing the same
+# '<robot>/...' layout via get_config_dir().
+_EXTERNAL_ROBOT_PACKAGES = {
+    'chocolate': 'soma_chocolate',
+}
+
+
+def _get_external_config_dir(robot: str):
+    package = _EXTERNAL_ROBOT_PACKAGES[robot]
+    try:
+        module = __import__(package)
+    except ImportError:
+        raise ImportError(
+            f"Robot [{robot}] requires the external package [{package}]. "
+            f"Install it with: pip install -e ~/soma-{robot}") from None
+    return module.get_config_dir()
+
+
+def resolve_config_path(relative: str):
+    """
+    Resolve a config-relative path, dispatching external robots to their packages.
+
+    Args:
+        relative (str): Path relative to the configs directory, using the
+            '<robot>/...' convention (e.g. 'chocolate/mjcf/chocolate_robot.xml').
+
+    Returns:
+        Path to the configuration file.
+    """
+    top = str(relative).split('/')[0].split(os.sep)[0]
+    if top in _EXTERNAL_ROBOT_PACKAGES:
+        return _get_external_config_dir(top) / relative
+    return io_utils.get_config_file(relative)
 
 
 def get_robot_mjcf_path(target: TargetType):
@@ -176,8 +208,8 @@ def get_robot_mjcf_path(target: TargetType):
     if target == TargetType.UNITREE_G1:
         return newton.utils.download_asset("unitree_g1") / "mjcf/g1_29dof_rev_1_0.xml"
     if target == TargetType.DR02:
-        return io_utils.get_config_file('dr02', 'mjcf/dr02_robot.xml')
+        return resolve_config_path('dr02/mjcf/dr02_robot.xml')
     if target == TargetType.CHOCOLATE:
-        return io_utils.get_config_file('chocolate', 'mjcf/chocolate_robot.xml')
+        return resolve_config_path('chocolate/mjcf/chocolate_robot.xml')
 
     raise ValueError(f"Unknown target type [{target}].")
