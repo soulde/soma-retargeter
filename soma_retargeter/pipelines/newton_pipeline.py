@@ -51,7 +51,7 @@ class NewtonPipeline:
             ValueError: If the target robot type is not supported.
         """
         self.source_type = pipeline_utils.get_source_type_from_str(source_type)
-        self.target_type = pipeline_utils.get_target_type_from_str(robot_type)
+        self.target_type = robot_type
         self.input_targets = []
         self.input_sample_rates = []
         self.max_frames = -1
@@ -69,10 +69,7 @@ class NewtonPipeline:
         self.smooth_joint_filter_coord_masks = None
         self.joint_limit_clamper = None
 
-        if self.target_type in (
-                pipeline_utils.TargetType.UNITREE_G1,
-                pipeline_utils.TargetType.DR02,
-                pipeline_utils.TargetType.CHOCOLATE):
+        if self.target_type in pipeline_utils.get_registered_targets():
             self.robot_builder = newton.ModelBuilder()
             self.robot_builder.add_mjcf(
                 str(pipeline_utils.get_robot_mjcf_path(self.target_type)))
@@ -179,7 +176,7 @@ class NewtonPipeline:
 
         print("[INFO] Newton Retargeter Settings: ")
         print(f"[INFO]\t  Source Skeleton Type: {pipeline_utils.get_source_str_from_type(self.source_type)}")
-        print(f"[INFO]\t  Target Robot Type: {pipeline_utils.get_target_str_from_type(self.target_type)}")
+        print(f"[INFO]\t  Target Robot Type: {self.target_type}")
         print(f"[INFO]\t  Post-Processing Enabled: {self.post_processing_enabled}")
         print(f"[INFO]\t  Initialization Pose: {self.initialization_pose is not None}")
         print(f"[INFO]\t  Initialization Frame Count: {self.num_initialization_frames}")

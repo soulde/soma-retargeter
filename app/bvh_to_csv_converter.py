@@ -49,7 +49,7 @@ class Viewer:
         self.playback_total_time = 0.0
 
         self.retarget_source_options = ['soma']
-        self.retarget_target_options = ['unitree_g1', 'dr02', 'chocolate']
+        self.retarget_target_options = pipeline_utils.get_registered_targets()
         self.retarget_solver_options = ['Newton']
         self.retarget_solver_idx     = 0
         self.retarget_target_idx     = 0
@@ -82,9 +82,8 @@ class Viewer:
 
     def build_robot_model(self, retarget_target: str):
         """Build the Newton preview model for the given target robot and push it to the viewer."""
-        robot_target = pipeline_utils.get_target_type_from_str(retarget_target)
         robot_builder = newton.ModelBuilder()
-        robot_builder.add_mjcf(str(pipeline_utils.get_robot_mjcf_path(robot_target)))
+        robot_builder.add_mjcf(str(pipeline_utils.get_robot_mjcf_path(retarget_target)))
 
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
