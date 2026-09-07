@@ -121,6 +121,16 @@ The NPZ fields are `fps`, `joint_pos`, `joint_vel`, `body_pos_w`,
 `body_quat_w` (wxyz), `body_lin_vel_w`, and `body_ang_vel_w`, with
 `joint_names` and `body_names` included as metadata.
 
+To retain all four sampling phases while converting 120 Hz CSV motion to
+50 Hz NPZ, first split each CSV into four 30 Hz sequences:
+
+```bash
+python ./app/csv_phase_to_npz.py input.csv output_dir --robot chocolate
+```
+
+The input may also be a directory; CSV files are discovered recursively and
+their relative directory structure is preserved.
+
 ## Code Overview
 
 ### `app/`
@@ -129,6 +139,7 @@ The NPZ fields are `fps`, `joint_pos`, `joint_vel`, `body_pos_w`,
 |------|-------------|
 | `bvh_to_csv_converter.py` | Main entry point. Drives both interactive and headless batch retargeting modes. |
 | `csv_to_npz.py` | Export retargeted CSV motion to BeyondMimic-compatible NPZ tensors. |
+| `csv_phase_to_npz.py` | Split 120 Hz CSV into four 30 Hz phases and export each to 50 Hz NPZ. |
 
 ### `soma_retargeter/`
 
