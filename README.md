@@ -121,15 +121,20 @@ The NPZ fields are `fps`, `joint_pos`, `joint_vel`, `body_pos_w`,
 `body_quat_w` (wxyz), `body_lin_vel_w`, and `body_ang_vel_w`, with
 `joint_names` and `body_names` included as metadata.
 
-To retain all four sampling phases while converting 120 Hz CSV motion to
-50 Hz NPZ, first split each CSV into four 30 Hz sequences:
+To retain all four sampling phases, split 120 Hz CSV motion into four 30 Hz
+sequences:
 
 ```bash
-python ./app/csv_phase_to_npz.py input.csv output_dir --robot chocolate
+python ./app/csv_split_phases.py input.csv output_dir
 ```
 
 The input may also be a directory; CSV files are discovered recursively and
-their relative directory structure is preserved.
+their relative directory structure is preserved. Convert a split CSV to 50 Hz
+NPZ in a separate step:
+
+```bash
+python ./app/csv_to_npz.py split_phase0_30hz.csv output.npz --robot chocolate --input-fps 30 --output-fps 50
+```
 
 ## Code Overview
 
@@ -139,7 +144,7 @@ their relative directory structure is preserved.
 |------|-------------|
 | `bvh_to_csv_converter.py` | Main entry point. Drives both interactive and headless batch retargeting modes. |
 | `csv_to_npz.py` | Export retargeted CSV motion to BeyondMimic-compatible NPZ tensors. |
-| `csv_phase_to_npz.py` | Split 120 Hz CSV into four 30 Hz phases and export each to 50 Hz NPZ. |
+| `csv_split_phases.py` | Split CSV motion into one decimated CSV per sampling phase. |
 
 ### `soma_retargeter/`
 
