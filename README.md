@@ -107,6 +107,20 @@ python ./app/bvh_to_csv_converter.py --config ./assets/default_bvh_to_csv_conver
 
 Batch mode recursively finds all `.bvh` files in the import folder, processes them in configurable batch sizes, and writes CSV files to the export folder mirroring the input directory structure.
 
+### BeyondMimic-compatible NPZ export
+
+Convert a retargeted CSV into an NPZ containing joint positions/velocities and
+world-space body poses/velocities. The exporter evaluates forward kinematics
+with the selected Newton robot model and supports frame-rate resampling:
+
+```bash
+python ./app/csv_to_npz.py input.csv output.npz --robot chocolate --input-fps 120 --output-fps 60
+```
+
+The NPZ fields are `fps`, `joint_pos`, `joint_vel`, `body_pos_w`,
+`body_quat_w` (wxyz), `body_lin_vel_w`, and `body_ang_vel_w`, with
+`joint_names` and `body_names` included as metadata.
+
 ## Code Overview
 
 ### `app/`
@@ -114,6 +128,7 @@ Batch mode recursively finds all `.bvh` files in the import folder, processes th
 | File | Description |
 |------|-------------|
 | `bvh_to_csv_converter.py` | Main entry point. Drives both interactive and headless batch retargeting modes. |
+| `csv_to_npz.py` | Export retargeted CSV motion to BeyondMimic-compatible NPZ tensors. |
 
 ### `soma_retargeter/`
 
