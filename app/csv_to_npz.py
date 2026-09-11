@@ -18,7 +18,7 @@ from soma_retargeter.pipelines import utils as pipeline_utils
 
 
 def convert_csv_to_npz(csv_path: str | Path, npz_path: str | Path, robot_type: str,
-                       input_fps: float = 120.0, output_fps: float | None = None) -> None:
+                       input_fps: float = 30.0, output_fps: float | None = None) -> None:
     """Load a retargeted CSV, evaluate Newton FK, and save motion tensors."""
     output_fps = input_fps if output_fps is None else output_fps
     csv_config = get_csv_config_for_target(robot_type)
@@ -68,7 +68,8 @@ def main() -> None:
     parser.add_argument("csv", type=Path)
     parser.add_argument("npz", type=Path)
     parser.add_argument("--robot", required=True, choices=pipeline_utils.get_registered_targets())
-    parser.add_argument("--input-fps", type=float, default=120.0)
+    parser.add_argument("--input-fps", type=float,
+                        help="Input FPS; inferred from a trailing _<fps>hz filename marker when omitted")
     parser.add_argument("--output-fps", type=float)
     args = parser.parse_args()
     convert_csv_to_npz(args.csv, args.npz, args.robot, args.input_fps, args.output_fps)

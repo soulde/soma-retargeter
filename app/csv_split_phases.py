@@ -15,6 +15,10 @@ from soma_retargeter.utils.frame_sampling import split_frame_phases
 def split_csv(csv_path: Path, output_dir: Path, input_fps: float = 120.0,
               stride: int = 4) -> list[Path]:
     """Write one decimated CSV for every phase while preserving the header."""
+    if input_fps <= 0:
+        raise ValueError("input_fps must be positive")
+    if stride <= 0:
+        raise ValueError("stride must be positive")
     with csv_path.open("r", encoding="utf-8", newline="") as stream:
         header = next(csv.reader(stream))
     frames = np.loadtxt(csv_path, delimiter=",", skiprows=1, ndmin=2)
@@ -51,6 +55,10 @@ def main() -> None:
     parser.add_argument("--input-fps", type=float, default=120.0)
     parser.add_argument("--stride", type=int, default=4)
     args = parser.parse_args()
+    if args.input_fps <= 0:
+        parser.error("--input-fps must be positive")
+    if args.stride <= 0:
+        parser.error("--stride must be positive")
     split_path(args.input, args.output_dir, args.input_fps, args.stride)
 
 

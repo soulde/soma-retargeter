@@ -158,7 +158,7 @@ def get_csv_config_for_target(robot_type: str) -> RobotCSVConfig:
         raise ValueError(f"Unknown robot type: [{robot_type}]. Allowed values are: {allowed}") from None
 
 
-def load_csv(file_path: str, fps: float = 120.0, csv_config: RobotCSVConfig = UnitreeG129DOF_CSVConfig()) -> CSVAnimationBuffer:
+def load_csv(file_path: str, fps: float = 30.0, csv_config: RobotCSVConfig = UnitreeG129DOF_CSVConfig()) -> CSVAnimationBuffer:
     """
     Load a robot motion CSV file into a ``CSVAnimationBuffer``.
     Args:
