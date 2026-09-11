@@ -98,9 +98,10 @@ class NewtonPipeline:
 
             effector_names = self.human_robot_scaler.effector_names()
             self.target_effector_indices = [effector_names.index(name) for name in self.mapped_joints]
+            feet_joint_names = retargeter_config.get(
+                'feet_joint_names', ["LeftFoot", "RightFoot"])
             self.feet_effector_indices = [
-                self.mapped_joints.index("LeftFoot"),
-                self.mapped_joints.index("RightFoot")]
+                self.mapped_joints.index(name) for name in feet_joint_names]
 
             self.feet_stabilizer = FeetStabilizer(pipeline_utils.resolve_config_path(retargeter_config['feet_stabilizer_config']))
             self.joint_limit_clamper = JointLimitClamper(self.ik_model)
@@ -235,7 +236,7 @@ class NewtonPipeline:
         num_frames_to_remove = self.num_initialization_frames + self.num_stabilization_frames
         joint_q_data = [np.full((len(self.input_targets[i]),), None) for i in range(num_envs)]
         for frame in trange(self.max_frames, desc="[INFO] Retargeting Motions"):
-            if frame <= num_frames_to_remove:
+            if num_frames_to_remove > 0 and frame <= num_frames_to_remove:
                 smooth_joint_filter_objective.set_weight(self.smooth_joint_filter_weight * (frame / float(num_frames_to_remove)))
 
             #start_time = time.time()

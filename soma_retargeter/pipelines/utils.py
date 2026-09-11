@@ -13,9 +13,11 @@ import soma_retargeter.assets.usd as usd_utils
 class SourceType(IntEnum):
     """Enumeration of supported source model types."""
     SOMA = auto()
+    SMPLX = auto()
 
 _SOURCE_TYPE_TO_STR = {
-    SourceType.SOMA : "soma"
+    SourceType.SOMA : "soma",
+    SourceType.SMPLX : "smplx"
 }
 _STR_TO_SOURCE_TYPE = {s : t for t, s in _SOURCE_TYPE_TO_STR.items()}
 
@@ -182,6 +184,11 @@ def get_source_model_mesh(source: SourceType, skeleton) -> dict:
             '/OUTPUT/c_geometry_grp',
             '/OUTPUT/c_skeleton_grp/Root')
 
+    if source == SourceType.SMPLX:
+        # No skeletal mesh is bundled for the SMPL-X source; the pipeline
+        # renders skeleton lines only.
+        return None
+
     raise ValueError(f"Unknown source type {source}.")
 
 
@@ -199,11 +206,21 @@ def get_retargeter_config(source: SourceType, target: str) -> dict:
     Raises:
         ValueError: If the source or target type is not supported.
     """
-    if source != SourceType.SOMA:
+    if source != SourceType.SOMA and source != SourceType.SMPLX:
         raise ValueError(f"Unknown source type [{source}] for target [{target}].")
 
     robot = _get_registered_robot(target)
-    return io_utils.load_json(robot.get_config_base() / robot.retargeter_config)
+    config_path = robot.get_config_base() / robot.retargeter_config
+    if source == SourceType.SMPLX:
+        # Robots register their SOMA retargeter config; SMPL-X configs live
+        # next to them under the smplx_to_* name.
+        config_path = config_path.with_name(
+            config_path.name.replace("soma_to_", "smplx_to_"))
+        if not config_path.exists():
+            raise FileNotFoundError(
+                f"No SMPL-X retargeter config for target [{target}]: "
+                f"expected [{config_path}].")
+    return io_utils.load_json(config_path)
 
 
 def resolve_config_path(relative: str):

@@ -11,6 +11,7 @@ import warp as wp
 import soma_retargeter.utils.math_utils as math_utils
 import soma_retargeter.assets.bvh as bvh_utils
 import soma_retargeter.assets.csv as csv_utils
+import soma_retargeter.assets.smplx as smplx_utils
 import soma_retargeter.utils.io_utils as io_utils
 import soma_retargeter.pipelines.utils as pipeline_utils
 
@@ -48,7 +49,7 @@ class Viewer:
         self.playback_loop       = True
         self.playback_total_time = 0.0
 
-        self.retarget_source_options = ['soma']
+        self.retarget_source_options = ['soma', 'smplx']
         self.retarget_target_options = pipeline_utils.get_registered_targets()
         self.retarget_solver_options = ['Newton']
         self.retarget_solver_idx     = 0
@@ -132,14 +133,24 @@ class Viewer:
         if self.coordinate_renderer is not None:
             self.coordinate_renderer.clear(self.viewer)
 
-        self.skeleton, animation = bvh_utils.load_bvh(path)
+        self.skeleton, animation = self.load_motion_file(path)
         self.skeleton_renderer = SkeletonRenderer(self.skeleton, [0])
         self.skeleton_instances = [SkeletonInstance(self.skeleton, _DEFAULT_COLOR, self.converter.transform(wp.transform_identity()))]
         self.animation_offsets = [wp.transform_identity()] * len(self.skeleton_instances)
         self.animation_buffers = [animation]
 
-        self.skeletal_mesh = pipeline_utils.get_source_model_mesh(pipeline_utils.SourceType.SOMA, self.skeleton)
-        self.skeletal_mesh_renderer = SkeletalMeshRenderer(self.skeletal_mesh)
+        source_type = pipeline_utils.get_source_type_from_str(
+            self.retarget_source_options[self.retarget_source_idx])
+        self.skeletal_mesh = pipeline_utils.get_source_model_mesh(source_type, self.skeleton)
+        self.skeletal_mesh_renderer = (
+            SkeletalMeshRenderer(self.skeletal_mesh) if self.skeletal_mesh is not None else None)
+
+    def load_motion_file(self, path):
+        """Load a BVH (soma source) or SMPL-X npz (smplx source) motion file."""
+        source = self.retarget_source_options[self.retarget_source_idx]
+        if source == 'smplx' or str(path).endswith('.npz'):
+            return smplx_utils.load_smplx_npz(str(path))
+        return bvh_utils.load_bvh(path)
         self.compute_playback_total_time()
 
     def compute_playback_total_time(self):
@@ -219,7 +230,7 @@ class Viewer:
                 if self.show_skeleton_joint_axes:
                     tx = self.skeleton_instances[i].compute_global_transforms()
                     self.coordinate_renderer.draw(self.viewer, tx, 0.1, i)
-                if self.show_skeleton_mesh:
+                if self.show_skeleton_mesh and self.skeletal_mesh_renderer is not None:
                     self.skeletal_mesh_renderer.draw(self.viewer, self.skeleton_instances[i], self.skeleton_instances[i].color, i)
                 self.skeleton_instances[i].xform = prev_xform
         
@@ -285,17 +296,24 @@ class Viewer:
         if ui.collapsing_header("Motion", flags=ui.TreeNodeFlags_.default_open):
             ui.separator()
             ui.align_text_to_frame_padding()
-            ui.text("BVH Motion:")
+            ui.text("Source:")
             ui.same_line()
-            
+            ui.set_next_item_width(100)
+            changed, self.retarget_source_idx = ui.combo(
+                "##RetargetSource", self.retarget_source_idx, self.retarget_source_options)
+
+            ui.align_text_to_frame_padding()
+            ui.text("Motion:")
+            ui.same_line()
+
             ui.push_id(100)
             if ui.button("Load"):
                 root = tk.Tk()
                 root.withdraw()
                 bvh_path = tk_filedialog.askopenfilename(
-                    title='Load BVH File',
+                    title='Load Motion File',
                     defaultextension=".bvh",
-                    filetypes=[('BVH files', '*.bvh')])
+                    filetypes=[('Motion files', '*.bvh *.npz')])
 
                 if bvh_path:
                     self.load_bvh_file(bvh_path)
@@ -441,29 +459,43 @@ class Viewer:
             export_path.mkdir(parents=True, exist_ok=True)
 
         batch_size = self.config['batch_size']
-        bvh_files = list(import_path.rglob("*.bvh"))
-        if (len(bvh_files) == 0):
-            print(f"[ERROR]: Import folder {str(import_path)}, does not contain any BVH files.")
+        retarget_source = self.config['retarget_source']
+        motion_extension = { 'soma': '.bvh', 'smplx': '.npz' }.get(retarget_source)
+        if motion_extension is None:
+            print(f"[ERROR]: Unsupported retarget_source [{retarget_source}]. Use 'soma' or 'smplx'.")
+            exit(-1)
+
+        motion_files = [p for p in import_path.rglob(f"*{motion_extension}") if not p.name.endswith("_stagei.npz")]
+        if (len(motion_files) == 0):
+            print(f"[ERROR]: Import folder {str(import_path)}, does not contain any {motion_extension} files.")
             exit(-1)
 
         # Sort files based on size (largest first)
-        bvh_files.sort(key=lambda p: p.stat().st_size, reverse=True)
-        batches = [bvh_files[i:i + batch_size] for i in range(0, len(bvh_files), batch_size)]
-        
+        motion_files.sort(key=lambda p: p.stat().st_size, reverse=True)
+        batches = [motion_files[i:i + batch_size] for i in range(0, len(motion_files), batch_size)]
+
         # All skeletons should be the same, load one as our reference
-        bvh_importer = bvh_utils.BVHImporter()
-        bvh_skeleton, _ = bvh_importer.create_skeleton(batches[0][0])
+        if retarget_source == 'smplx':
+            ref_skeleton = smplx_utils.create_smplx_skeleton(
+                up_axis=smplx_utils.detect_up_axis_for_files(batches[0]))
+        else:
+            bvh_importer = bvh_utils.BVHImporter()
+            ref_skeleton, _ = bvh_importer.create_skeleton(batches[0][0])
 
-        bvh_tx_converter = self.converter.transform(wp.transform_identity())
-        expected_num_joints = bvh_skeleton.num_joints
+        # The SMPL-X loader already emits motion in the pipeline's Z-up frame;
+        # the facing-direction converter is a SOMA BVH convention.
+        if retarget_source == 'smplx':
+            bvh_tx_converter = wp.transform_identity()
+        else:
+            bvh_tx_converter = self.converter.transform(wp.transform_identity())
+        expected_num_joints = ref_skeleton.num_joints
 
-        retarget_source = self.config['retarget_source']
         retarget_solver = self.config['retargeter']
         retarget_target = self.config["retarget_target"]
         retarget_pipeline = None
         if (retarget_solver == 'Newton'):
             import soma_retargeter.pipelines.newton_pipeline as newton_pipeline
-            retarget_pipeline = newton_pipeline.NewtonPipeline(bvh_skeleton, retarget_source, retarget_target)
+            retarget_pipeline = newton_pipeline.NewtonPipeline(ref_skeleton, retarget_source, retarget_target)
         if retarget_pipeline is None:
             print(f"[ERROR]: Invalid retarget solver selected [{retarget_solver}]. Use 'Newton'.")
             exit(-1)
@@ -477,7 +509,10 @@ class Viewer:
             print(f"[INFO]: Loading {len(batch)} animations...")
             animations = []
             for file_path in batch:
-                _, animation = bvh_utils.load_bvh(file_path, bvh_skeleton)
+                if retarget_source == 'smplx':
+                    _, animation = smplx_utils.load_smplx_npz(str(file_path), ref_skeleton)
+                else:
+                    _, animation = bvh_utils.load_bvh(file_path, ref_skeleton)
                 # All animations should be on the same skeleton
                 assert expected_num_joints == animation.skeleton.num_joints, (
                     f"[ERROR]: Unexpected number of joints in input motion. Expected {expected_num_joints}, "

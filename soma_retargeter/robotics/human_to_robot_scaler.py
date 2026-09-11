@@ -32,8 +32,12 @@ class HumanToRobotScaler:
                 wp.vec3(*t_offset),
                 wp.normalize(wp.quat(*q_offset)))
 
-        joint_offsets["LeftToeBase"] = joint_offsets["LeftToe"]
-        joint_offsets["RightToeBase"] = joint_offsets["RightToe"]
+        # SOMA skeletons expose the toe under both names; keep the aliasing
+        # backward compatible for configs that use it.
+        if "LeftToeBase" in joint_offset_data and "LeftToe" in joint_offsets:
+            joint_offsets["LeftToeBase"] = joint_offsets["LeftToe"]
+        if "RightToeBase" in joint_offset_data and "RightToe" in joint_offsets:
+            joint_offsets["RightToeBase"] = joint_offsets["RightToe"]
 
         self.mapped_joints = [name for name in self.skeleton.joint_names if name in joint_scales.keys()]
         self.mapped_joint_indices = wp.array([self.skeleton.joint_index(name) for name in self.mapped_joints], dtype=wp.int32)
