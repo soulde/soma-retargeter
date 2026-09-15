@@ -14,10 +14,12 @@ class SourceType(IntEnum):
     """Enumeration of supported source model types."""
     SOMA = auto()
     SMPLX = auto()
+    LAFAN1 = auto()
 
 _SOURCE_TYPE_TO_STR = {
     SourceType.SOMA : "soma",
-    SourceType.SMPLX : "smplx"
+    SourceType.SMPLX : "smplx",
+    SourceType.LAFAN1 : "lafan1",
 }
 _STR_TO_SOURCE_TYPE = {s : t for t, s in _SOURCE_TYPE_TO_STR.items()}
 
@@ -43,6 +45,7 @@ class TargetRobot:
     retargeter_config: str
     get_config_base: Callable[[], Path]
     get_mjcf_path: Callable[[], Path]
+    retargeter_configs: dict[str, str] | None = None
 
 
 _TARGET_REGISTRY: Dict[str, TargetRobot] = {}
@@ -206,20 +209,26 @@ def get_retargeter_config(source: SourceType, target: str) -> dict:
     Raises:
         ValueError: If the source or target type is not supported.
     """
-    if source != SourceType.SOMA and source != SourceType.SMPLX:
-        raise ValueError(f"Unknown source type [{source}] for target [{target}].")
-
     robot = _get_registered_robot(target)
-    config_path = robot.get_config_base() / robot.retargeter_config
-    if source == SourceType.SMPLX:
+    source_name = get_source_str_from_type(source)
+    explicit_configs = robot.retargeter_configs or {}
+    if source_name in explicit_configs:
+        config_path = robot.get_config_base() / explicit_configs[source_name]
+    elif source == SourceType.SOMA:
+        config_path = robot.get_config_base() / robot.retargeter_config
+    elif source == SourceType.SMPLX:
         # Robots register their SOMA retargeter config; SMPL-X configs live
         # next to them under the smplx_to_* name.
-        config_path = config_path.with_name(
-            config_path.name.replace("soma_to_", "smplx_to_"))
+        soma_path = robot.get_config_base() / robot.retargeter_config
+        config_path = soma_path.with_name(
+            soma_path.name.replace("soma_to_", "smplx_to_"))
         if not config_path.exists():
             raise FileNotFoundError(
                 f"No SMPL-X retargeter config for target [{target}]: "
                 f"expected [{config_path}].")
+    else:
+        raise ValueError(
+            f"Source [{source_name}] is not configured for target [{target}].")
     return io_utils.load_json(config_path)
 
 
