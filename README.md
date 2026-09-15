@@ -5,7 +5,7 @@
 
 Convert [SOMA](https://github.com/NVlabs/SOMA-X) human motion captures into humanoid robot joint animation. Takes BVH motion files as input and produces robot-playable CSV joint data as output using GPU-optimized inverse kinematics via [Newton](https://github.com/newton-physics/newton) and high-performance computation with [NVIDIA Warp](https://github.com/NVIDIA/warp).
 
-The retargeting pipeline handles proportional human-to-robot scaling, multi-objective IK solving with joint limits, feet stabilization to maintain ground contact, and per-DOF joint limit clamping. Currently supports SOMA as the input skeleton and Unitree G1 (29 DOF) as the output robot. Additional robot targets are planned.
+The retargeting pipeline handles proportional human-to-robot scaling, multi-objective IK solving with joint limits, feet stabilization to maintain ground contact, and per-DOF joint limit clamping. Input adapters include SOMA BVH, SMPL-X NPZ, and standard 22-joint LAFAN1 BVH. Robot packages register their own source-specific retargeting configurations.
 
 SOMA Retargeter is part of the [SOMA body model](https://github.com/NVlabs/SOMA-X) ecosystem for humanoid motion data.
 
@@ -120,6 +120,32 @@ python ./app/csv_to_npz.py input.csv output.npz --robot chocolate --input-fps 12
 The NPZ fields are `fps`, `joint_pos`, `joint_vel`, `body_pos_w`,
 `body_quat_w` (wxyz), `body_lin_vel_w`, and `body_ang_vel_w`, with
 `joint_names` and `body_names` included as metadata.
+
+### LAFAN1 to Chocolate
+
+The LAFAN1 adapter validates the standard 22-joint hierarchy, reads the native
+rate from BVH `Frame Time`, and converts its Y-up coordinates to the pipeline's
+Z-up frame. It does not split a clip into sampling phases. With the Chocolate
+target package installed, the complete one-file-to-one-file export is:
+
+```bash
+./scripts/export_lafan1_chocolate_npz50.sh
+```
+
+Defaults are `/home/jvwei/datasets/lafan1` for input,
+`/home/jvwei/datasets/lafan1_retargeted/chocolate_csv30` for retargeted CSV,
+and `/home/jvwei/datasets/lafan1_retargeted/chocolate_npz50` for NPZ. Each CSV
+is resampled directly from its source `Frame Time` (normally 30 Hz) to 50 Hz.
+Existing output is never overwritten. To continue an interrupted export after
+validating completed NPZ files, use:
+
+```bash
+RESUME=1 ./scripts/export_lafan1_chocolate_npz50.sh
+```
+
+To convert already-retargeted CSV without running IK again, set
+`SKIP_RETARGET=1`. `INPUT_ROOT`, `CSV_ROOT`, `NPZ_ROOT`, `BATCH_SIZE`, and
+`DEVICE` may also be overridden.
 
 To retain all four sampling phases, split 120 Hz CSV motion into four 30 Hz
 sequences:
