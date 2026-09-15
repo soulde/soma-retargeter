@@ -11,6 +11,7 @@ wheels/
 
 # IDE
 .vscode/settings.json
+.worktrees/
 
 # Log files, settings
 imgui.ini
