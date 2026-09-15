@@ -49,7 +49,7 @@ class Viewer:
         self.playback_loop       = True
         self.playback_total_time = 0.0
 
-        self.retarget_source_options = ['soma', 'smplx']
+        self.retarget_source_options = ['soma', 'smplx', 'lafan1']
         self.retarget_target_options = pipeline_utils.get_registered_targets()
         self.retarget_solver_options = ['Newton']
         self.retarget_solver_idx     = 0
@@ -146,11 +146,9 @@ class Viewer:
             SkeletalMeshRenderer(self.skeletal_mesh) if self.skeletal_mesh is not None else None)
 
     def load_motion_file(self, path):
-        """Load a BVH (soma source) or SMPL-X npz (smplx source) motion file."""
+        """Load a motion using the selected source adapter."""
         source = self.retarget_source_options[self.retarget_source_idx]
-        if source == 'smplx' or str(path).endswith('.npz'):
-            return smplx_utils.load_smplx_npz(str(path))
-        return bvh_utils.load_bvh(path)
+        return pipeline_utils.motion_source_descriptor(source).load(str(path))
         self.compute_playback_total_time()
 
     def compute_playback_total_time(self):
@@ -460,10 +458,12 @@ class Viewer:
 
         batch_size = self.config['batch_size']
         retarget_source = self.config['retarget_source']
-        motion_extension = { 'soma': '.bvh', 'smplx': '.npz' }.get(retarget_source)
-        if motion_extension is None:
-            print(f"[ERROR]: Unsupported retarget_source [{retarget_source}]. Use 'soma' or 'smplx'.")
+        try:
+            source_descriptor = pipeline_utils.motion_source_descriptor(retarget_source)
+        except ValueError as error:
+            print(f"[ERROR]: {error}")
             exit(-1)
+        motion_extension = source_descriptor.extension
 
         motion_files = [p for p in import_path.rglob(f"*{motion_extension}") if not p.name.endswith("_stagei.npz")]
         if (len(motion_files) == 0):
@@ -478,13 +478,15 @@ class Viewer:
         if retarget_source == 'smplx':
             ref_skeleton = smplx_utils.create_smplx_skeleton(
                 up_axis=smplx_utils.detect_up_axis_for_files(batches[0]))
+        elif retarget_source == 'lafan1':
+            ref_skeleton, _ = source_descriptor.load(str(batches[0][0]))
         else:
             bvh_importer = bvh_utils.BVHImporter()
             ref_skeleton, _ = bvh_importer.create_skeleton(batches[0][0])
 
         # The SMPL-X loader already emits motion in the pipeline's Z-up frame;
         # the facing-direction converter is a SOMA BVH convention.
-        if retarget_source == 'smplx':
+        if source_descriptor.root_transform_is_identity:
             bvh_tx_converter = wp.transform_identity()
         else:
             bvh_tx_converter = self.converter.transform(wp.transform_identity())
@@ -509,10 +511,7 @@ class Viewer:
             print(f"[INFO]: Loading {len(batch)} animations...")
             animations = []
             for file_path in batch:
-                if retarget_source == 'smplx':
-                    _, animation = smplx_utils.load_smplx_npz(str(file_path), ref_skeleton)
-                else:
-                    _, animation = bvh_utils.load_bvh(file_path, ref_skeleton)
+                _, animation = source_descriptor.load(str(file_path), ref_skeleton)
                 # All animations should be on the same skeleton
                 assert expected_num_joints == animation.skeleton.num_joints, (
                     f"[ERROR]: Unexpected number of joints in input motion. Expected {expected_num_joints}, "

@@ -8,6 +8,9 @@ from typing import Callable, Dict, List
 
 import soma_retargeter.utils.io_utils as io_utils
 import soma_retargeter.assets.usd as usd_utils
+from soma_retargeter.assets.bvh import load_bvh
+from soma_retargeter.assets.lafan1 import load_lafan1_bvh
+from soma_retargeter.assets.smplx import load_smplx_npz
 
 
 class SourceType(IntEnum):
@@ -46,6 +49,22 @@ class TargetRobot:
     get_config_base: Callable[[], Path]
     get_mjcf_path: Callable[[], Path]
     retargeter_configs: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class MotionSourceDescriptor:
+    """File and coordinate conventions for one supported motion source."""
+
+    extension: str
+    load: Callable
+    root_transform_is_identity: bool
+
+
+_MOTION_SOURCE_DESCRIPTORS = {
+    "soma": MotionSourceDescriptor(".bvh", load_bvh, False),
+    "smplx": MotionSourceDescriptor(".npz", load_smplx_npz, True),
+    "lafan1": MotionSourceDescriptor(".bvh", load_lafan1_bvh, True),
+}
 
 
 _TARGET_REGISTRY: Dict[str, TargetRobot] = {}
@@ -166,6 +185,18 @@ def get_source_type_from_str(source: str) -> SourceType:
         raise ValueError(f"Unknown source type: [{source}]. Allowed values: {allowed}") from None
 
 
+def motion_source_descriptor(source: str | SourceType) -> MotionSourceDescriptor:
+    """Return the loader, extension, and root-transform policy for a source."""
+
+    source_name = get_source_str_from_type(source) if isinstance(source, SourceType) else source
+    try:
+        return _MOTION_SOURCE_DESCRIPTORS[source_name]
+    except KeyError:
+        allowed = ", ".join(_MOTION_SOURCE_DESCRIPTORS)
+        raise ValueError(
+            f"Unknown source type: [{source_name}]. Allowed values: {allowed}") from None
+
+
 def get_source_model_mesh(source: SourceType, skeleton) -> dict:
     """
     Retrieve model mesh for a given source type.
@@ -190,6 +221,10 @@ def get_source_model_mesh(source: SourceType, skeleton) -> dict:
     if source == SourceType.SMPLX:
         # No skeletal mesh is bundled for the SMPL-X source; the pipeline
         # renders skeleton lines only.
+        return None
+
+    if source == SourceType.LAFAN1:
+        # LAFAN1 is distributed as a skeleton animation without a mesh.
         return None
 
     raise ValueError(f"Unknown source type {source}.")
