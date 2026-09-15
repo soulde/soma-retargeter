@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import warp as wp
+from scipy.spatial.transform import Rotation
 
 from soma_retargeter.animation.animation_buffer import create_animation_buffer_for_skeleton
 from soma_retargeter.animation.skeleton import Skeleton
@@ -51,6 +52,23 @@ def load_lafan1_bvh(
     if not np.isfinite(animation.sample_rate) or animation.sample_rate <= 0:
         raise ValueError("LAFAN1 animation sample rate must be finite and positive.")
 
+    # LAFAN1 BVHs are Y-up. Rotate the world/root transform by +90 degrees
+    # around X so height becomes +Z and forward becomes -Y. Local child
+    # transforms stay unchanged because this is a world-frame conversion.
+    root_rotation = Rotation.from_euler("x", 90.0, degrees=True)
+    converted = animation.local_transforms.copy()
+    converted[:, 0, :3] = root_rotation.apply(converted[:, 0, :3])
+    converted[:, 0, 3:7] = (
+        root_rotation * Rotation.from_quat(converted[:, 0, 3:7])
+    ).as_quat().astype(np.float32)
+    animation.local_transforms = converted
+
+    reference = source_skeleton.reference_local_transforms
+    reference[0, :3] = root_rotation.apply(reference[0, :3])
+    reference[0, 3:7] = (
+        root_rotation * Rotation.from_quat(reference[0, 3:7])
+    ).as_quat().astype(np.float32)
+    source_skeleton._reference_local_transforms = reference
     source_skeleton.up_axis = wp.vec3(0.0, 0.0, 1.0)
     source_skeleton.forward_axis = wp.vec3(0.0, -1.0, 0.0)
 

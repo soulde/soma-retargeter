@@ -42,6 +42,11 @@ def test_load_standard_lafan1_sample():
     assert list(skeleton.forward_axis) == [0.0, -1.0, 0.0]
     assert np.isfinite(skeleton.reference_local_transforms).all()
     assert np.isfinite(animation.local_transforms).all()
+    global_pose = np.asarray(animation.compute_global_transforms(0))
+    hips_z = global_pose[skeleton.joint_index("Hips"), 2]
+    head_z = global_pose[skeleton.joint_index("Head"), 2]
+    assert 0.5 < hips_z < 1.5
+    assert head_z > hips_z + 0.4
 
 
 @pytest.mark.parametrize(
