@@ -1,0 +1,9 @@
+{
+  "import_folder": "/home/jvwei/datasets/lafan1",
+  "export_folder": "/tmp/lafan1_chocolate_smoke_csv",
+  "batch_size": 1,
+  "retargeter": "Newton",
+  "retarget_source": "lafan1",
+  "retarget_target": "chocolate",
+  "retarget_source_facing_direction": "Mujoco"
+}
