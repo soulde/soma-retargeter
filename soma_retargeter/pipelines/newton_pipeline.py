@@ -42,7 +42,7 @@ class NewtonPipeline:
         Args:
             skeleton: Common skeleton definition used by the input clips to be retargeted.
             source_type: Source skeleton type name. Currently only "soma" is supported.
-            robot_type: Target robot type name ("unitree_g1", "dr02" or "chocolate").
+            robot_type: Target robot type name registered with soma-retargeter.
             retarget_config: Optional configuration dictionary. If None, a
                 configuration is loaded from disk based on the source/target
                 types.
