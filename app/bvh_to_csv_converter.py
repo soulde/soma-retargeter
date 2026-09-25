@@ -144,12 +144,12 @@ class Viewer:
         self.skeletal_mesh = pipeline_utils.get_source_model_mesh(source_type, self.skeleton)
         self.skeletal_mesh_renderer = (
             SkeletalMeshRenderer(self.skeletal_mesh) if self.skeletal_mesh is not None else None)
+        self.compute_playback_total_time()
 
     def load_motion_file(self, path):
         """Load a motion using the selected source adapter."""
         source = self.retarget_source_options[self.retarget_source_idx]
         return pipeline_utils.motion_source_descriptor(source).load(str(path))
-        self.compute_playback_total_time()
 
     def compute_playback_total_time(self):
         bvh_max_time = 0.0
