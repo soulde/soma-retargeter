@@ -133,20 +133,25 @@ class FeetStabilizer:
                 if use_hint:
                     chain_hint_world = wp.transform_point(body_q[chain_hint_idx], in_chain_hint_offsets[i])
 
+                tip_offset_world = wp.quat_rotate(
+                    in_ik_targets[env, i].q, in_chain_tip_offsets[i])
+                body_target = wp.transform(
+                    in_ik_targets[env, i].p - tip_offset_world,
+                    in_ik_targets[env, i].q)
+
                 result = ik_utils.wp_solve_two_bone_ik(
                     1.0,
                     body_q[in_chain_parent_indices[i]],
                     body_q[chain_indices[0]],
                     body_q[chain_indices[1]],
                     body_q[chain_indices[2]],
-                    in_ik_targets[env, i],
+                    body_target,
                     use_hint,
                     chain_hint_world)
 
                 out_result[env, offset + 0] = result.root
                 out_result[env, offset + 1] = result.mid
-                out_result[env, offset + 2] = wp.transform(
-                    wp.transform_point(result.tip, in_chain_tip_offsets[i]), result.tip.q)
+                out_result[env, offset + 2] = result.tip
                 offset += wp.int32(3)
 
         wp.launch(
