@@ -3,7 +3,7 @@ import subprocess
 
 import numpy as np
 
-from soma_retargeter.assets.csv import Chocolate23DOF_CSVConfig
+from soma_chocolate.csv import Chocolate23DOFCSVConfig
 
 
 SCRIPT = os.path.abspath("scripts/export_lafan1_chocolate_npz50.sh")
@@ -14,7 +14,7 @@ def _write_inputs(root, csv_root):
     csv_root.mkdir()
     (root / "walk_fixture.bvh").write_text(
         "HIERARCHY\nMOTION\nFrames: 2\nFrame Time: 0.0333333333\n")
-    header = Chocolate23DOF_CSVConfig.csv_header
+    header = Chocolate23DOFCSVConfig.csv_header
     row0 = np.zeros(len(header), dtype=np.float32)
     row1 = row0.copy()
     row0[0], row1[0] = 0, 1

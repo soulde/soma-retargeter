@@ -109,36 +109,12 @@ class DR0229DOF_CSVConfig:
         return UnitreeG129DOF_CSVConfig.to_csv_row(self, frame_idx, anim_row)
 
 
-@dataclass
-class Chocolate23DOF_CSVConfig:
-    name: str = "chocolate_23dof"
-    csv_header: ClassVar[List[str]] = [
-        "Frame",
-        "root_translateX", "root_translateY", "root_translateZ",
-        "root_rotateX", "root_rotateY", "root_rotateZ",
-        "waist_pitch_joint_dof", "waist_roll_joint_dof", "waist_yaw_joint_dof",
-        "left_hip_pitch_joint_dof", "left_hip_roll_joint_dof", "left_hip_yaw_joint_dof",
-        "left_knee_joint_dof", "left_ankle_pitch_joint_dof", "left_ankle_roll_joint_dof",
-        "right_hip_pitch_joint_dof", "right_hip_roll_joint_dof", "right_hip_yaw_joint_dof",
-        "right_knee_joint_dof", "right_ankle_pitch_joint_dof", "right_ankle_roll_joint_dof",
-        "left_shoulder_pitch_joint_dof", "left_shoulder_roll_joint_dof",
-        "left_shoulder_yaw_joint_dof", "left_elbow_joint_dof",
-        "right_shoulder_pitch_joint_dof", "right_shoulder_roll_joint_dof",
-        "right_shoulder_yaw_joint_dof", "right_elbow_joint_dof"]
-
-    def to_anim_frame(self, csv_row: np.ndarray) -> np.ndarray:
-        return UnitreeG129DOF_CSVConfig.to_anim_frame(self, csv_row)
-
-    def to_csv_row(self, frame_idx: int, anim_row: np.ndarray) -> List[float]:
-        return UnitreeG129DOF_CSVConfig.to_csv_row(self, frame_idx, anim_row)
-
-
 def get_csv_config_for_target(robot_type: str) -> RobotCSVConfig:
     """
     Select the CSV export configuration for a given target robot type.
 
     Args:
-        robot_type (str): Target robot type name (e.g. "unitree_g1", "dr02", "chocolate").
+        robot_type (str): Target robot type name.
 
     Returns:
         RobotCSVConfig: The CSV configuration matching the target robot.
@@ -146,10 +122,15 @@ def get_csv_config_for_target(robot_type: str) -> RobotCSVConfig:
     Raises:
         ValueError: If the target robot type is not supported.
     """
+    from soma_retargeter.pipelines import utils as pipeline_utils
+
+    robot = pipeline_utils._get_registered_robot(robot_type)
+    if robot.csv_config_factory is not None:
+        return robot.csv_config_factory()
+
     configs = {
         "unitree_g1": UnitreeG129DOF_CSVConfig(),
         "dr02": DR0229DOF_CSVConfig(),
-        "chocolate": Chocolate23DOF_CSVConfig(),
     }
     try:
         return configs[robot_type]

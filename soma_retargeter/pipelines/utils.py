@@ -49,6 +49,7 @@ class TargetRobot:
     get_config_base: Callable[[], Path]
     get_mjcf_path: Callable[[], Path]
     retargeter_configs: dict[str, str] | None = None
+    csv_config_factory: Callable[[], object] | None = None
 
 
 @dataclass(frozen=True)
