@@ -38,6 +38,8 @@ class FeetStabilizer:
         body_names = [newton_utils.get_name_from_label(label) for label in self.robot_builder.body_label]
         self.effector_mapped_indices = [body_names.index(body_name) for (body_name, _) in self.effectors.items()]
         self.effector_weights = [wp.vec2(*tr_weights) for (_, tr_weights) in self.effectors.items()]
+        self.effector_offsets = [self.effector_offsets_by_name.get(body_name, wp.vec3(0.0, 0.0, 0.0))
+                                 for (body_name, _) in self.effectors.items()]
         effector_parent_indices = [self.robot_builder.joint_parent[idx] for idx in self.effector_mapped_indices]
 
         self.pelvis_idx = self.effector_mapped_indices[self.ik_root]
@@ -113,6 +115,7 @@ class FeetStabilizer:
             in_chain_parent_indices : wp.array1d(dtype=wp.int32),
             in_chain_hint_indices   : wp.array1d(dtype=wp.int32),
             in_chain_hint_offsets   : wp.array1d(dtype=wp.vec3),
+            in_chain_tip_offsets    : wp.array1d(dtype=wp.vec3),
             in_ik_targets           : wp.array2d(dtype=wp.transform),
             out_result              : wp.array2d(dtype=wp.transform)
         ):
@@ -142,7 +145,8 @@ class FeetStabilizer:
 
                 out_result[env, offset + 0] = result.root
                 out_result[env, offset + 1] = result.mid
-                out_result[env, offset + 2] = result.tip
+                out_result[env, offset + 2] = wp.transform(
+                    wp.transform_point(result.tip, in_chain_tip_offsets[i]), result.tip.q)
                 offset += wp.int32(3)
 
         wp.launch(
@@ -156,6 +160,8 @@ class FeetStabilizer:
                 self.two_bone_ik_chain_parent,
                 self.two_bone_ik_hint_references,
                 self.two_bone_ik_hint_offsets,
+                wp.array([self.effector_offsets[limb[_LIMB_DATA_IDX_EFFECTOR_INDICES][2]]
+                          for limb in self.ik_limb_data], dtype=wp.vec3),
                 wp.array2d(targets_tx, dtype=wp.transform)],
                 outputs=[self.out_effectors])
 
@@ -176,6 +182,10 @@ class FeetStabilizer:
         self.joint_limit_weight = data['joint_limit_weight']
 
         self.effectors = data['effectors']
+        self.effector_offsets_by_name = {
+            name: wp.vec3(*offset)
+            for name, offset in data.get('effector_offsets', {}).items()
+        }
         self.num_effectors = len(self.effectors)
 
         self.ik_root = data['ik_root']
@@ -188,7 +198,10 @@ class FeetStabilizer:
         pos_effector_arrays, rot_effector_arrays = [], []
         for i in range(self.num_effectors):
             body_idx = self.effector_mapped_indices[i]
-            pos_effector_arrays.append(wp.array(body_q_np[:, body_idx, 0:3], dtype=wp.vec3))
+            pos_effector_arrays.append(wp.array([
+                wp.transform_point(wp.transform(*body_q_np[env, body_idx]), self.effector_offsets[i])
+                for env in range(self.num_envs)
+            ], dtype=wp.vec3))
             rot_effector_arrays.append(wp.array(body_q_np[:, body_idx, 3:7], dtype=wp.vec4))
 
         self.position_objectives = []
@@ -200,7 +213,7 @@ class FeetStabilizer:
             self.position_objectives.append(
                 newton.ik.IKObjectivePosition(
                     link_index=body_idx,
-                    link_offset=wp.vec3(0.0, 0.0, 0.0),
+                    link_offset=self.effector_offsets[i],
                     target_positions=pos_effector_arrays[i],
                     weight=t_weight
                     )

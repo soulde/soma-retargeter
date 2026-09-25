@@ -300,7 +300,10 @@ class NewtonPipeline:
         for joint, mapping_data in retargeter_config["ik_map"].items():
             mapped_joints.append(joint)
             mapped_joint_indices.append(skeleton.joint_index(joint))
-            mapped_body_link_pos_data.append((body_names.index(mapping_data['t_body']), mapping_data['t_weight']))
+            mapped_body_link_pos_data.append((
+                body_names.index(mapping_data['t_body']),
+                mapping_data['t_weight'],
+                wp.vec3(*mapping_data.get('t_offset', [0.0, 0.0, 0.0]))))
             mapped_body_link_rot_data.append((body_names.index(mapping_data['r_body']), mapping_data['r_weight']))
 
         return (
@@ -322,8 +325,9 @@ class NewtonPipeline:
         body_q = state.body_q.numpy()
         for env in range(num_envs):
             base = env * self.num_body_count
-            for ee_idx, (link_idx, _) in enumerate(self.mapped_body_link_pos_data):
-                pos_targets[env, ee_idx] = body_q[base + link_idx][0:3]
+            for ee_idx, (link_idx, _, link_offset) in enumerate(self.mapped_body_link_pos_data):
+                pos_targets[env, ee_idx] = wp.transform_point(
+                    wp.transform(*body_q[base + link_idx]), link_offset)
 
             for ee_idx, (link_idx, _) in enumerate(self.mapped_body_link_rot_data):
                 rot_wp = wp.quat(body_q[base + link_idx][3:7])
@@ -341,10 +345,10 @@ class NewtonPipeline:
             rot_target_arrays.append(rot_wp)
 
         position_objectives = []
-        for i, (link_idx, w) in enumerate(self.mapped_body_link_pos_data):
+        for i, (link_idx, w, link_offset) in enumerate(self.mapped_body_link_pos_data):
             objective = ik.IKObjectivePosition(
                 link_index=link_idx,
-                link_offset=wp.vec3(0.0, 0.0, 0.0),
+                link_offset=link_offset,
                 target_positions=pos_target_arrays[i],
                 weight=w)
             position_objectives.append(objective)
