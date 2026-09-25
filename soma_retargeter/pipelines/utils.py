@@ -236,7 +236,7 @@ def get_retargeter_config(source: SourceType, target: str) -> dict:
 
     Args:
         source (SourceType): The source type.
-        target (str): The target robot name (e.g. "unitree_g1", "chocolate").
+        target (str): The target robot name registered by a target package.
 
     Returns:
         dict: The loaded JSON configuration for the retargeter.
@@ -273,8 +273,7 @@ def resolve_config_path(relative: str):
 
     Args:
         relative (str): Path relative to a configs root, using the '<robot>/...'
-            convention (e.g. 'chocolate/mjcf/chocolate_robot.xml' or
-            'soma/soma_zero_frame0.bvh').
+            convention for registered target packages.
 
     Returns:
         Path to the configuration file.
