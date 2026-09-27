@@ -216,7 +216,7 @@ class Viewer:
         local_transforms = pose_utils.compute_local_pose(
             self.scaled_skeleton,
             global_transforms,
-            robot_root,
+            wp.transform_identity(),
         )
         scaled_instance.set_local_transforms(local_transforms)
         self.scaled_skeleton_renderer.draw(self.viewer, scaled_instance, 1000 + index)
@@ -305,8 +305,8 @@ class Viewer:
                     self.coordinate_renderer.draw(self.viewer, tx, 0.1, i)
                 if self.show_skeleton_mesh and self.skeletal_mesh_renderer is not None:
                     self.skeletal_mesh_renderer.draw(self.viewer, self.skeleton_instances[i], self.skeleton_instances[i].color, i)
-                self._draw_scaled_skeleton_overlay(i)
                 self.skeleton_instances[i].xform = prev_xform
+                self._draw_scaled_skeleton_overlay(i)
         
         if self.show_gizmos:
             for i, offset in enumerate(self.robot_offsets):

@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import warp as wp
 
 import app.bvh_to_csv_converter as converter
 from app.bvh_to_csv_converter import Viewer
@@ -71,7 +72,49 @@ def test_scaled_skeleton_overlay_updates_and_draws_only_when_enabled(monkeypatch
     viewer.show_scaled_skeleton = True
     viewer._draw_scaled_skeleton_overlay(0)
     assert scaler.calls == 1
-    assert calls == [(scaled_skeleton, global_transforms, robot_root)]
+    assert len(calls) == 1
+    assert calls[0][0] is scaled_skeleton
+    assert calls[0][1] is global_transforms
+    np.testing.assert_allclose(calls[0][2].p, (0.0, 0.0, 0.0))
     assert scaled_instance.local_transforms is local_transforms
     assert scaled_instance.xform is robot_root
     assert renderer.draw_calls == [(fake_viewer, scaled_instance, 1000)]
+
+
+def test_source_preview_offset_does_not_move_scaled_overlay():
+    source_instance = SimpleNamespace(xform=wp.transform_identity())
+    seen = []
+
+    class _Viewer:
+        def begin_frame(self, time):
+            pass
+
+        def log_state(self, state):
+            pass
+
+        def end_frame(self):
+            pass
+
+    class _SourceRenderer:
+        def draw(self, viewer, instance, index):
+            seen.append(("source", float(instance.xform.p[0])))
+
+    viewer = object.__new__(Viewer)
+    viewer.viewer = _Viewer()
+    viewer.time = 0.0
+    viewer.state = object()
+    viewer.animation_buffers = [object()]
+    viewer.skeleton_instances = [source_instance]
+    viewer.animation_offsets = [wp.transform(wp.vec3(3.0, 0.0, 0.0), wp.quat_identity())]
+    viewer.skeleton_renderer = _SourceRenderer()
+    viewer.show_skeleton = True
+    viewer.show_skeleton_joint_axes = False
+    viewer.show_skeleton_mesh = False
+    viewer.show_gizmos = False
+    viewer._draw_scaled_skeleton_overlay = lambda index: seen.append(
+        ("scaled", float(source_instance.xform.p[0])))
+
+    viewer.render()
+
+    assert seen == [("source", 3.0), ("scaled", 0.0)]
+    assert float(source_instance.xform.p[0]) == 0.0
