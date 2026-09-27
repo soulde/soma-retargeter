@@ -58,10 +58,11 @@ def get_view_transform_for_source(source: str, facing_direction: str):
     so applying the legacy SOMA/MuJoCo facing transform a second time would
     rotate the displayed skeleton and robot by another 90 degrees.
 
-    SMPL-X motions are converted onto the SOMA skeleton in the SOMA BVH
-    frame by their loader, so they follow the same converter as SOMA BVHs.
+    SMPL-X is likewise normalized to the internal Z-up frame by its loader
+    (the up-axis rotation is baked into the root joint), so it needs the
+    same exemption.
     """
-    if source == "lafan1":
+    if source in ("lafan1", "smplx"):
         return wp.transform_identity()
     converter = SpaceConverter(get_facing_direction_type_from_str(facing_direction))
     return converter.transform(wp.transform_identity())

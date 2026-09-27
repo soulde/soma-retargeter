@@ -235,31 +235,6 @@ SMPLX_TO_SOMA_JOINT = {
 
 _SOMA_SKELETON_CACHE = None
 _SOMA_ZERO_LOCALS_CACHE = None
-_SOMA_CONVERSION_CACHE = None
-
-
-def _qmul(a, b):
-    """Batched Hamilton product of xyzw quaternions (..., 4)."""
-    ax, ay, az, aw = a[..., 0], a[..., 1], a[..., 2], a[..., 3]
-    bx, by, bz, bw = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
-    return np.stack([
-        aw * bx + ax * bw + ay * bz - az * by,
-        aw * by - ax * bz + ay * bw + az * bx,
-        aw * bz + ax * by - ay * bx + az * bw,
-        aw * bw - ax * bx - ay * by - az * bz,
-    ], axis=-1)
-
-
-def _qinv(q):
-    out = np.array(q, dtype=np.float64, copy=True)
-    out[..., :3] *= -1.0
-    return out
-
-
-def _qrot(q, v):
-    """Rotate vectors v (..., 3) by unit quaternions q (..., 4)."""
-    qv = q[..., :3]
-    return v + 2.0 * np.cross(qv, np.cross(qv, v) + q[..., 3:4] * v)
 
 
 def _soma_reference_skeleton() -> Skeleton:
@@ -275,45 +250,6 @@ def _soma_reference_skeleton() -> Skeleton:
         # BVHs are expressed against. Undriven joints use these locals.
         _SOMA_ZERO_LOCALS_CACHE = np.asarray(zero_anim.get_local_transforms(0)).copy()
     return _SOMA_SKELETON_CACHE
-
-
-def _soma_conversion_constants(smplx_skeleton: Skeleton):
-    """Per-joint constants of the SMPL-X -> SOMA transfer (computed once).
-
-    Returns (frame_fix, hips_q0, hips_t0): the fixed per-joint frame
-    correction calibrated from the matched rest pair (SMPL-X bind pose <->
-    SOMA zero-frame standing pose), plus the Hips zero-frame local. The SOMA
-    rig binds horizontally, so its standing joint frames differ from the
-    SMPL-X canonical ones by a constant rotation per joint; without it the
-    driven globals would fold the skeleton.
-    """
-    global _SOMA_CONVERSION_CACHE
-    if _SOMA_CONVERSION_CACHE is not None and _SOMA_CONVERSION_CACHE[0] is smplx_skeleton:
-        return _SOMA_CONVERSION_CACHE[1:]
-
-    soma_skel = _soma_reference_skeleton()
-    zero_locals = np.asarray(_SOMA_ZERO_LOCALS_CACHE)
-    soma_idx = {n: i for i, n in enumerate(soma_skel.joint_names)}
-    smplx_idx = {n: i for i, n in enumerate(smplx_skeleton.joint_names)}
-    rx_inv = R.from_euler("x", -90, degrees=True)
-
-    soma_zero_g = np.asarray(soma_skel.compute_global_transforms(
-        [wp.transform(wp.vec3(*z[:3]), wp.quat(*z[3:7])) for z in zero_locals]))
-    smplx_rest_g = np.asarray(smplx_skeleton.compute_global_transforms(
-        smplx_skeleton.reference_local_transforms))
-    frame_fix = {}
-    for xname, sname in SMPLX_TO_SOMA_JOINT.items():
-        i = smplx_idx[xname]
-        r_soma = R.from_quat(soma_zero_g[soma_idx[sname], 3:7])
-        r_smplx_bvh = rx_inv * R.from_quat(smplx_rest_g[i, 3:7])
-        frame_fix[soma_idx[sname]] = (r_soma * r_smplx_bvh.inv()).as_quat()
-
-    hips_i = soma_idx["Hips"]
-    hips_local = np.asarray(zero_locals[hips_i], dtype=np.float64)
-    _SOMA_CONVERSION_CACHE = (
-        smplx_skeleton, frame_fix, soma_idx,
-        hips_local[3:7], hips_local[:3])
-    return _SOMA_CONVERSION_CACHE[1:]
 
 
 def convert_animation_to_soma_skeleton(
@@ -335,9 +271,6 @@ def convert_animation_to_soma_skeleton(
     expressed in the SOMA BVH frame (Y-up), exactly like BVH data, so the app
     applies the same "Mujoco" facing converter to it as to real SOMA input.
 
-    Vectorized over frames (batched quaternion products), so loading cost is
-    linear in frames with a small constant.
-
     Args:
         smplx_skeleton: The SMPL-X skeleton the animation is currently on.
         animation: The animation in the pipeline (Z-up) frame.
@@ -348,72 +281,74 @@ def convert_animation_to_soma_skeleton(
         tuple (Skeleton, AnimationBuffer) on the SOMA skeleton.
     """
     soma_skel = _soma_reference_skeleton()
-    frame_fix, soma_idx, hips_q0, hips_t0 = _soma_conversion_constants(smplx_skeleton)
+    zero_locals = np.asarray(_SOMA_ZERO_LOCALS_CACHE)
     num_frames = animation.num_frames
-    num_joints = soma_skel.num_joints
+    soma_idx = {n: i for i, n in enumerate(soma_skel.joint_names)}
     smplx_idx = {n: i for i, n in enumerate(smplx_skeleton.joint_names)}
-    smplx_parents = smplx_skeleton.parent_indices
-    soma_parents = soma_skel.parent_indices
-    hips_i = soma_idx["Hips"]
 
     # pipeline frame (Z-up) -> SOMA BVH frame (Y-up); the app's converter
     # applies the inverse (+90 deg about X) afterwards, like for soma BVHs.
     rx_inv = R.from_euler("x", -90, degrees=True)
-    rx_inv_q = rx_inv.as_quat()
 
-    smplx_locals = np.asarray(animation.local_transforms).astype(np.float64)  # (N, 22, 7)
-    lq = smplx_locals[..., 3:7]
-
-    # SMPL-X global rotations, batched FK over frames
-    gq = np.empty_like(lq)
-    gq[:, 0] = lq[:, 0]
-    for j in range(1, len(smplx_parents)):
-        gq[:, j] = _qmul(gq[:, smplx_parents[j]], lq[:, j])
-
-    # Driven targets: frame_fix @ (Rx(-90) @ g_smplx), positions only needed
-    # for the pelvis (the Root solve); other joints use zero-frame offsets.
-    tgt = {}
+    # Fixed per-joint frame correction, calibrated once from the matched rest
+    # pair (SMPL-X bind pose <-> SOMA zero-frame standing pose). The SOMA rig
+    # binds horizontally, so its standing joint frames differ from the SMPL-X
+    # canonical ones by a constant rotation per joint; without it the driven
+    # globals would fold the skeleton.
+    soma_zero_g = np.asarray(soma_skel.compute_global_transforms(
+        [wp.transform(wp.vec3(*z[:3]), wp.quat(*z[3:7])) for z in zero_locals]))
+    smplx_rest_g = np.asarray(smplx_skeleton.compute_global_transforms(
+        smplx_skeleton.reference_local_transforms))
+    frame_fix = {}
     for xname, sname in SMPLX_TO_SOMA_JOINT.items():
-        j = soma_idx[sname]
         i = smplx_idx[xname]
-        tgt[j] = _qmul(frame_fix[j], _qmul(rx_inv_q, gq[:, i]))
-    pelvis_bvh = rx_inv.apply(smplx_locals[:, 0, :3])  # (N, 3)
+        r_soma = R.from_quat(soma_zero_g[soma_idx[sname], 3:7])
+        r_smplx_bvh = rx_inv * R.from_quat(smplx_rest_g[i, 3:7])
+        frame_fix[soma_idx[sname]] = r_soma * r_smplx_bvh.inv()
 
-    # Root local: rotation so Hips (keeping its zero-frame local) reaches the
-    # pelvis target rotation; translation so Hips lands on the pelvis target.
-    root_rot = _qmul(tgt[hips_i], _qinv(hips_q0))
-    root_pos = pelvis_bvh - _qrot(root_rot, hips_t0)
+    parents = soma_skel.parent_indices
+    hips_i = soma_idx["Hips"]
+    hips_local = np.asarray(zero_locals[hips_i], dtype=np.float64)
+    hips_q0 = R.from_quat(hips_local[3:7])
+    hips_t0 = hips_local[:3]
 
-    zero_locals = np.asarray(_SOMA_ZERO_LOCALS_CACHE).astype(np.float64)  # (J, 7)
-    local_np = np.tile(zero_locals[None, :, :], (num_frames, 1, 1))
-    local_np[:, 0, :3] = root_pos
-    local_np[:, 0, 3:7] = root_rot
+    local_transforms = np.zeros((num_frames, soma_skel.num_joints), dtype=wp.transform)
+    for f in range(num_frames):
+        g = np.asarray(smplx_skeleton.compute_global_transforms(
+            animation.get_local_transforms(f)))
+        tgt = {}
+        for xname, sname in SMPLX_TO_SOMA_JOINT.items():
+            i = smplx_idx[xname]
+            j = soma_idx[sname]
+            tgt[j] = (
+                rx_inv.apply(g[i, :3].astype(np.float64)),
+                frame_fix[j] * (rx_inv * R.from_quat(g[i, 3:7])),
+            )
 
-    # Walk the SOMA tree (batched over frames) to solve driven locals.
-    gq_soma = np.zeros((num_frames, num_joints, 4))
-    gq_soma[:, 0] = root_rot
-    for j in range(1, num_joints):
-        p = soma_parents[j]
-        if j == hips_i:
-            local_np[:, j, 3:7] = zero_locals[j, 3:7]
-            gq_soma[:, j] = _qmul(gq_soma[:, p], hips_q0)
-        elif j in tgt:
-            local_np[:, j, 3:7] = _qmul(_qinv(gq_soma[:, p]), tgt[j])
-            gq_soma[:, j] = tgt[j]
-        else:
-            local_np[:, j, 3:7] = zero_locals[j, 3:7]
-            gq_soma[:, j] = _qmul(gq_soma[:, p], zero_locals[j, 3:7])
-
-    # Keep quaternion signs continuous across frames: the converted locals are
-    # solved per frame, so q and -q may alternate for the same rotation; the
-    # playback interpolation would then pass through zero and tumble.
-    quats = local_np[..., 3:7]
-    dots = np.einsum("nfj,nfj->nf", quats[1:], quats[:-1])  # (N-1, J)
-    sign = np.cumprod(np.where(dots < 0.0, -1.0, 1.0), axis=0)
-    quats[1:] *= sign[..., None]
-
-    local_transforms = np.zeros((num_frames, num_joints), dtype=wp.transform)
-    local_transforms[:] = local_np
+        grot = [None] * soma_skel.num_joints
+        row = local_transforms[f]
+        for j in range(soma_skel.num_joints):
+            p = parents[j]
+            lz = np.asarray(zero_locals[j], dtype=np.float64)
+            if p == -1:
+                # Solve the Root local so Hips (keeping its zero-frame local)
+                # lands on the pelvis target.
+                hips_pos, hips_rot = tgt[hips_i]
+                root_rot = hips_rot * hips_q0.inv()
+                t = hips_pos - root_rot.apply(hips_t0)
+                row[j] = wp.transform(wp.vec3(*t), wp.quat(*root_rot.as_quat()))
+                grot[j] = root_rot
+            elif j == hips_i:
+                row[j] = wp.transform(wp.vec3(*lz[:3]), wp.quat(*lz[3:7]))
+                grot[j] = grot[p] * hips_q0
+            elif j in tgt:
+                _, rot = tgt[j]
+                local_rot = grot[p].inv() * rot
+                row[j] = wp.transform(wp.vec3(*lz[:3]), wp.quat(*local_rot.as_quat()))
+                grot[j] = rot
+            else:
+                row[j] = wp.transform(wp.vec3(*lz[:3]), wp.quat(*lz[3:7]))
+                grot[j] = grot[p] * R.from_quat(lz[3:7])
 
     converted = AnimationBuffer(soma_skel, num_frames, animation.sample_rate, local_transforms)
     if input_skeleton is None:
