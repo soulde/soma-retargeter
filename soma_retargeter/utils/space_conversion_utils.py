@@ -51,6 +51,22 @@ def get_facing_direction_type_from_str(facing_direction: str) -> FacingDirection
         raise ValueError(f"Unknown facing direction type: [{facing_direction}]. Allowed values: {allowed}") from None
 
 
+def get_view_transform_for_source(source: str, facing_direction: str):
+    """Return the source-to-view transform used for displaying an animation.
+
+    LAFAN1 is normalized from Y-up to the internal Z-up frame by its loader,
+    so applying the legacy SOMA/MuJoCo facing transform a second time would
+    rotate the displayed skeleton and robot by another 90 degrees.
+
+    SMPL-X motions are converted onto the SOMA skeleton in the SOMA BVH
+    frame by their loader, so they follow the same converter as SOMA BVHs.
+    """
+    if source == "lafan1":
+        return wp.transform_identity()
+    converter = SpaceConverter(get_facing_direction_type_from_str(facing_direction))
+    return converter.transform(wp.transform_identity())
+
+
 class SpaceConverter:
     """
     Utility class for converting between different coordinate spaces, such as from Maya or Mujoco to
@@ -87,4 +103,3 @@ class SpaceConverter:
     def transform(self, transform):
         """Convert a transform from the source coordinate space to the internal representation."""
         return wp.mul(wp.transform(wp.vec3(0, 0, 0), self.converter), transform)
-    

@@ -19,7 +19,13 @@ from soma_retargeter.renderers.skeleton_renderer import SkeletonRenderer
 from soma_retargeter.renderers.mesh_renderer import SkeletalMeshRenderer
 from soma_retargeter.renderers.coordinate_renderer import CoordinateRenderer
 from soma_retargeter.animation.skeleton import SkeletonInstance
-from soma_retargeter.utils.space_conversion_utils import SpaceConverter, get_facing_direction_type_from_str
+from soma_retargeter.robotics.human_to_robot_scaler import HumanToRobotScaler
+from soma_retargeter.utils import pose_utils
+from soma_retargeter.utils.space_conversion_utils import (
+    SpaceConverter,
+    get_facing_direction_type_from_str,
+    get_view_transform_for_source,
+)
 
 from tqdm import trange
 
@@ -34,6 +40,10 @@ class Viewer:
         self.viewer.vsync = True
         self.config = config
         self.converter = SpaceConverter(get_facing_direction_type_from_str(self.config['retarget_source_facing_direction']))
+        self.source_view_transform = get_view_transform_for_source(
+            self.config.get("retarget_source", "soma"),
+            self.config['retarget_source_facing_direction'],
+        )
 
         if isinstance(self.viewer, newton.viewer.ViewerNull):
             # Headless mode for batch processing
@@ -57,7 +67,8 @@ class Viewer:
         self.retarget_source_idx     = 0
 
         self.show_skeleton_mesh = True
-        self.show_skeleton = False
+        self.show_skeleton = self.config.get("retarget_source") == "lafan1"
+        self.show_scaled_skeleton = False
         self.show_skeleton_joint_axes = False
         self.show_gizmos = True
 
@@ -75,6 +86,10 @@ class Viewer:
         self.skeleton = None
         self.skeleton_renderer = None
         self.skeletal_mesh_renderer = None
+        self.human_robot_scaler = None
+        self.scaled_skeleton = None
+        self.scaled_skeleton_renderer = None
+        self.scaled_skeleton_instances = []
 
         self.animation_offsets = []
         self.animation_buffers = []
@@ -126,6 +141,8 @@ class Viewer:
     def load_bvh_file(self, path):
         self.animation_buffers = []
         self.skeleton_instances = []
+        self._clear_scaled_skeleton_overlay()
+        self.human_robot_scaler = None
         if self.skeleton_renderer is not None:
             self.skeleton_renderer.clear(self.viewer)
         if self.skeletal_mesh_renderer is not None:
@@ -135,7 +152,7 @@ class Viewer:
 
         self.skeleton, animation = self.load_motion_file(path)
         self.skeleton_renderer = SkeletonRenderer(self.skeleton, [0])
-        self.skeleton_instances = [SkeletonInstance(self.skeleton, _DEFAULT_COLOR, self.converter.transform(wp.transform_identity()))]
+        self.skeleton_instances = [SkeletonInstance(self.skeleton, _DEFAULT_COLOR, self.source_view_transform)]
         self.animation_offsets = [wp.transform_identity()] * len(self.skeleton_instances)
         self.animation_buffers = [animation]
 
@@ -144,7 +161,70 @@ class Viewer:
         self.skeletal_mesh = pipeline_utils.get_source_model_mesh(source_type, self.skeleton)
         self.skeletal_mesh_renderer = (
             SkeletalMeshRenderer(self.skeletal_mesh) if self.skeletal_mesh is not None else None)
+        self._build_scaled_skeleton_overlay()
         self.compute_playback_total_time()
+
+    def _clear_scaled_skeleton_overlay(self):
+        if self.scaled_skeleton_renderer is not None:
+            self.scaled_skeleton_renderer.clear(self.viewer)
+        self.scaled_skeleton = None
+        self.scaled_skeleton_renderer = None
+        self.scaled_skeleton_instances = []
+
+    def _build_scaled_skeleton_overlay(self, scaler=None):
+        self._clear_scaled_skeleton_overlay()
+        if self.skeleton is None or not self.skeleton_instances:
+            self.human_robot_scaler = None
+            self.show_scaled_skeleton = False
+            return
+
+        try:
+            if scaler is None:
+                source = self.retarget_source_options[self.retarget_source_idx]
+                source_type = pipeline_utils.get_source_type_from_str(source)
+                retargeter_config = pipeline_utils.get_retargeter_config(
+                    source_type,
+                    self.retarget_target_options[self.retarget_target_idx],
+                )
+                scaler = HumanToRobotScaler(
+                    self.skeleton,
+                    retargeter_config["model_height"],
+                    pipeline_utils.resolve_config_path(
+                        retargeter_config["human_robot_scaler_config"]),
+                )
+        except (FileNotFoundError, KeyError, ValueError) as error:
+            self.human_robot_scaler = None
+            self.show_scaled_skeleton = False
+            print(f"[WARNING]: Scaled skeleton display unavailable: {error}")
+            return
+
+        self.human_robot_scaler = scaler
+        self.scaled_skeleton = scaler.create_scaled_skeleton(self.skeleton_instances[0])
+        self.scaled_skeleton_renderer = SkeletonRenderer(self.scaled_skeleton)
+        scaled_color = (0.25, 0.85, 1.0)
+        self.scaled_skeleton_instances = [
+            SkeletonInstance(self.scaled_skeleton, scaled_color, source_instance.xform)
+            for source_instance in self.skeleton_instances
+        ]
+
+    def _draw_scaled_skeleton_overlay(self, index):
+        if (not self.show_scaled_skeleton or self.human_robot_scaler is None
+                or self.scaled_skeleton_renderer is None):
+            return
+
+        source_instance = self.skeleton_instances[index]
+        scaled_instance = self.scaled_skeleton_instances[index]
+        scaled_instance.xform = self.robot_offsets[index]
+        global_transforms = self.human_robot_scaler.compute_effectors_from_skeleton(
+            source_instance, True)
+        robot_root = self.robot_offsets[index]
+        local_transforms = pose_utils.compute_local_pose(
+            self.scaled_skeleton,
+            global_transforms,
+            robot_root,
+        )
+        scaled_instance.set_local_transforms(local_transforms)
+        self.scaled_skeleton_renderer.draw(self.viewer, scaled_instance, 1000 + index)
 
     def load_motion_file(self, path):
         """Load a motion using the selected source adapter."""
@@ -230,6 +310,7 @@ class Viewer:
                     self.coordinate_renderer.draw(self.viewer, tx, 0.1, i)
                 if self.show_skeleton_mesh and self.skeletal_mesh_renderer is not None:
                     self.skeletal_mesh_renderer.draw(self.viewer, self.skeleton_instances[i], self.skeleton_instances[i].color, i)
+                self._draw_scaled_skeleton_overlay(i)
                 self.skeleton_instances[i].xform = prev_xform
         
         if self.show_gizmos:
@@ -262,6 +343,7 @@ class Viewer:
             raise(ValueError(f"[ERROR]: Unknown retargeter solver [{retarget_solver}"))
         
         r_offsets = [wp.transform(wp.vec3(0,0,0), wp.quat(*s.xform[3:7])) for s in self.skeleton_instances]
+        self._build_scaled_skeleton_overlay(pipeline.human_robot_scaler)
         pipeline.add_input_motions(self.animation_buffers, r_offsets, True)
         buffers = pipeline.execute()
         
@@ -372,6 +454,8 @@ class Viewer:
             if changed:
                 self.robot_csv_animation_buffers = [None for _ in range(self.num_robots)]
                 self.build_robot_model(self.retarget_target_options[self.retarget_target_idx])
+                if self.skeleton is not None:
+                    self._build_scaled_skeleton_overlay()
 
         # Visibility options
         ui.spacing()
@@ -384,6 +468,14 @@ class Viewer:
             changed, self.show_skeleton = ui.checkbox("Show Skeleton", self.show_skeleton)
             if changed and self.skeleton_renderer is not None:
                 self.skeleton_renderer.clear(self.viewer)
+            if self.human_robot_scaler is None:
+                ui.begin_disabled()
+            changed, self.show_scaled_skeleton = ui.checkbox(
+                "Show Scaled Skeleton", self.show_scaled_skeleton)
+            if self.human_robot_scaler is None:
+                ui.end_disabled()
+            if changed and self.scaled_skeleton_renderer is not None:
+                self.scaled_skeleton_renderer.clear(self.viewer)
             changed, self.show_skeleton_joint_axes = ui.checkbox("Show Joint Axes", self.show_skeleton_joint_axes)
             if changed and self.coordinate_renderer is not None:
                 self.coordinate_renderer.clear(self.viewer)
@@ -475,17 +567,16 @@ class Viewer:
         batches = [motion_files[i:i + batch_size] for i in range(0, len(motion_files), batch_size)]
 
         # All skeletons should be the same, load one as our reference
-        if retarget_source == 'smplx':
-            ref_skeleton = smplx_utils.create_smplx_skeleton(
-                up_axis=smplx_utils.detect_up_axis_for_files(batches[0]))
-        elif retarget_source == 'lafan1':
+        if retarget_source == 'smplx' or retarget_source == 'lafan1':
+            # Both loaders normalize their sources in code (smplx onto the
+            # SOMA skeleton, lafan1 into the pipeline frame).
             ref_skeleton, _ = source_descriptor.load(str(batches[0][0]))
         else:
             bvh_importer = bvh_utils.BVHImporter()
             ref_skeleton, _ = bvh_importer.create_skeleton(batches[0][0])
 
-        # The SMPL-X loader already emits motion in the pipeline's Z-up frame;
-        # the facing-direction converter is a SOMA BVH convention.
+        # Sources whose loaders already emit motion in the pipeline's Z-up
+        # frame skip the SOMA BVH facing converter.
         if source_descriptor.root_transform_is_identity:
             bvh_tx_converter = wp.transform_identity()
         else:

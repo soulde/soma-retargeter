@@ -17,7 +17,8 @@ def _make_smplx_npz(tmp_path, num_frames=5, knee_bend=0.0):
     data = {
         "root_orient": np.zeros((num_frames, 3), dtype=np.float64),
         "pose_body": np.zeros((num_frames, 3 * (NUM_BODY_JOINTS - 1)), dtype=np.float64),
-        "trans": np.zeros((num_frames, 3), dtype=np.float64),
+        # Standing pelvis height (SMPL-X Y-up) so the figure is on the ground.
+        "trans": np.tile([0.0, 0.95, 0.0], (num_frames, 1)),
         "mocap_frame_rate": np.float64(100.0),
     }
     if knee_bend:
@@ -42,16 +43,21 @@ def test_skeleton_rest_pose_matches_exported_offsets():
     assert head_z > pelvis_z + 0.4
 
 
-def test_load_npz_zero_pose_reproduces_rest_skeleton(tmp_path):
+def test_load_npz_converts_onto_soma_skeleton(tmp_path):
     path, _ = _make_smplx_npz(tmp_path, knee_bend=0.0)
     skeleton, animation = load_smplx_npz(str(path))
     assert animation.num_frames == 5
     assert animation.sample_rate == 100.0
 
+    # The motion is transferred onto the canonical SOMA skeleton (Y-up BVH
+    # frame): Hips/LeftArm naming, upright stance.
+    assert "Hips" in skeleton.joint_names
+    assert "LeftArm" in skeleton.joint_names
     global_tx = np.asarray(animation.compute_global_transforms(0))
-    rest_tx = np.asarray(skeleton.compute_global_transforms(
-        skeleton.reference_local_transforms, wp.transform_identity()))
-    np.testing.assert_allclose(global_tx, rest_tx, atol=1e-5)
+    hips_y = global_tx[skeleton.joint_index("Hips"), 1]
+    head_y = global_tx[skeleton.joint_index("Head"), 1]
+    assert 0.5 < hips_y < 1.4
+    assert head_y > hips_y + 0.4
 
 
 def test_load_npz_rotates_root_translation_to_z_up(tmp_path):
@@ -59,44 +65,59 @@ def test_load_npz_rotates_root_translation_to_z_up(tmp_path):
     data["trans"][:, 1] = 1.5  # up in SMPL-X Y-up coordinates
     np.savez(path, **data)
 
+    skeleton, animation = load_smplx_npz(str(path))
+    # Up (+Y in SMPL-X) stays up (+Y) in the SOMA BVH frame after the fixed
+    # conversion; the Hips rides on the pelvis target (transl + canonical J0).
     from soma_retargeter.assets.smplx import load_smplx_rest_skeleton_json
-    j0 = load_smplx_rest_skeleton_json()["offsets"][0]  # canonical pelvis offset
-
-    _, animation = load_smplx_npz(str(path))
-    root_tx = animation.get_local_transforms(0)[0]  # [px, py, pz, qx, qy, qz, qw]
-    # Y-up (+Z-forward) rotates to Z-up (-Y-forward); the unrotated pelvis
-    # offset J0 rides along with the translation.
-    assert root_tx[2] == pytest.approx(1.5 + j0[1], abs=1e-4)  # now along +Z
-    assert root_tx[1] == pytest.approx(-j0[2], abs=1e-4)
+    j0_y = load_smplx_rest_skeleton_json()["offsets"][0][1]
+    hips_y = np.asarray(animation.compute_global_transforms(0))[
+        skeleton.joint_index("Hips"), 1]
+    assert hips_y == pytest.approx(1.5 + j0_y, abs=0.02)
 
 
-def test_load_npz_joint_rotation_order(tmp_path):
+def test_load_npz_drives_soma_joints_with_smplx_rotations(tmp_path):
     path, _ = _make_smplx_npz(tmp_path, knee_bend=0.5)
-    _, animation = load_smplx_npz(str(path))
+    skeleton, animation = load_smplx_npz(str(path))
 
-    # pose_body joint 3 (left_knee, index 3 in the 21 body joints) carries a
-    # 0.5 rad rotation about x; verify the local transform matches.
-    local = animation.get_local_transforms(0)  # (num_joints, 7) [p, q xyzw]
-    knee_idx = create_smplx_skeleton().joint_index("left_knee")
-    expected = R.from_rotvec([0.5, 0.0, 0.0]).as_quat()  # xyzw
-    actual = local[knee_idx, 3:7]
-    # q and -q encode the same rotation.
-    if np.dot(expected, actual) < 0:
-        actual = -actual
-    np.testing.assert_allclose(actual, expected, atol=1e-5)
+    # Contract: each driven SOMA joint's global rotation equals the SMPL-X
+    # joint's global rotation moved into the BVH frame and corrected by the
+    # fixed per-joint frame fix (calibrated from the matched rest pair).
+    smplx_skel = create_smplx_skeleton()
+    ref = np.asarray(smplx_skel.reference_local_transforms).copy()
+    knee = smplx_skel.joint_index("left_knee")
+    ref[knee, 3:7] = R.from_rotvec([0.5, 0.0, 0.0]).as_quat()
+    locals_ = [wp.transform(wp.vec3(*t[:3]), wp.quat(*t[3:7])) for t in ref]
+    g = np.asarray(smplx_skel.compute_global_transforms(locals_))
+    rx_inv = R.from_euler("x", -90, degrees=True)
+
+    from soma_retargeter.assets.smplx import _soma_reference_skeleton, _SOMA_ZERO_LOCALS_CACHE, SMPLX_TO_SOMA_JOINT
+    soma_skel = _soma_reference_skeleton()
+    soma_zero_g = np.asarray(soma_skel.compute_global_transforms(
+        [wp.transform(wp.vec3(*z[:3]), wp.quat(*z[3:7])) for z in _SOMA_ZERO_LOCALS_CACHE]))
+    smplx_rest_g = np.asarray(smplx_skel.compute_global_transforms(
+        smplx_skel.reference_local_transforms))
+
+    soma_g = np.asarray(animation.compute_global_transforms(0))
+    for xname, sname in SMPLX_TO_SOMA_JOINT.items():
+        i = smplx_skel.joint_index(xname)
+        j = skeleton.joint_index(sname)
+        fix = R.from_quat(soma_zero_g[j, 3:7]) * (rx_inv * R.from_quat(smplx_rest_g[i, 3:7])).inv()
+        expected = fix * (rx_inv * R.from_quat(g[i, 3:7]))
+        actual = R.from_quat(soma_g[j, 3:7])
+        assert np.degrees((expected.inv() * actual).magnitude()) < 1e-3
 
 
 @pytest.mark.skipif(not __import__("os").path.exists(KIT_SAMPLE),
                     reason="KIT sample not available on this machine")
 def test_load_kit_sample():
     skeleton, animation = load_smplx_npz(KIT_SAMPLE)
-    assert skeleton.num_joints == NUM_BODY_JOINTS
+    assert "Hips" in skeleton.joint_names
     assert animation.num_frames > 0
     assert animation.sample_rate == pytest.approx(120.0)  # KIT mocap frame rate
-    # Pelvis height in Z-up should reach a plausible humanoid range over the
-    # clip (the first frame may be a crouched/ground-contact pose).
-    pelvis_idx = skeleton.joint_index("pelvis")
-    pelvis_z = max(
-        np.asarray(animation.compute_global_transforms(f))[pelvis_idx, 2]
+    # Pelvis height (Y in the SOMA BVH frame) should reach a plausible
+    # humanoid range over the clip.
+    hips_idx = skeleton.joint_index("Hips")
+    hips_y = max(
+        np.asarray(animation.compute_global_transforms(f))[hips_idx, 1]
         for f in range(0, animation.num_frames, 50))
-    assert 0.5 < pelvis_z < 1.5
+    assert 0.5 < hips_y < 1.5

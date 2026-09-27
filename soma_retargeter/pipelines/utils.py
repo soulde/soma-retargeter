@@ -63,7 +63,10 @@ class MotionSourceDescriptor:
 
 _MOTION_SOURCE_DESCRIPTORS = {
     "soma": MotionSourceDescriptor(".bvh", load_bvh, False),
-    "smplx": MotionSourceDescriptor(".npz", load_smplx_npz, True),
+    # The SMPL-X loader transfers motions onto the SOMA skeleton in the SOMA
+    # BVH frame (fixed in-code conversion), so it follows the same converter
+    # and retargeter-config path as SOMA BVHs.
+    "smplx": MotionSourceDescriptor(".npz", load_smplx_npz, False),
     "lafan1": MotionSourceDescriptor(".bvh", load_lafan1_bvh, True),
 }
 
@@ -250,18 +253,11 @@ def get_retargeter_config(source: SourceType, target: str) -> dict:
     explicit_configs = robot.retargeter_configs or {}
     if source_name in explicit_configs:
         config_path = robot.get_config_base() / explicit_configs[source_name]
-    elif source == SourceType.SOMA:
+    elif source in (SourceType.SOMA, SourceType.SMPLX):
+        # SMPL-X motions are converted onto the SOMA skeleton by their loader
+        # (fixed in-code transform, LAFAN1-style), so they reuse the
+        # soma-calibrated retargeter configs unchanged.
         config_path = robot.get_config_base() / robot.retargeter_config
-    elif source == SourceType.SMPLX:
-        # Robots register their SOMA retargeter config; SMPL-X configs live
-        # next to them under the smplx_to_* name.
-        soma_path = robot.get_config_base() / robot.retargeter_config
-        config_path = soma_path.with_name(
-            soma_path.name.replace("soma_to_", "smplx_to_"))
-        if not config_path.exists():
-            raise FileNotFoundError(
-                f"No SMPL-X retargeter config for target [{target}]: "
-                f"expected [{config_path}].")
     else:
         raise ValueError(
             f"Source [{source_name}] is not configured for target [{target}].")
