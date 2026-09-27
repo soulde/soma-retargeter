@@ -404,6 +404,14 @@ def convert_animation_to_soma_skeleton(
             local_np[:, j, 3:7] = zero_locals[j, 3:7]
             gq_soma[:, j] = _qmul(gq_soma[:, p], zero_locals[j, 3:7])
 
+    # Keep quaternion signs continuous across frames: the converted locals are
+    # solved per frame, so q and -q may alternate for the same rotation; the
+    # playback interpolation would then pass through zero and tumble.
+    quats = local_np[..., 3:7]
+    dots = np.einsum("nfj,nfj->nf", quats[1:], quats[:-1])  # (N-1, J)
+    sign = np.cumprod(np.where(dots < 0.0, -1.0, 1.0), axis=0)
+    quats[1:] *= sign[..., None]
+
     local_transforms = np.zeros((num_frames, num_joints), dtype=wp.transform)
     local_transforms[:] = local_np
 
