@@ -134,13 +134,7 @@ def blend_pose_kernel(
     """Blends between two local poses."""
     idx = wp.tid()
     t = wp.lerp(in_local_pose0[idx].p, in_local_pose1[idx].p, theta)
-    q0 = in_local_pose0[idx].q
-    q1 = in_local_pose1[idx].q
-    # q and -q encode the same rotation; align signs or the slerp path
-    # passes through zero and the skeleton tumbles.
-    if (q0[0]*q1[0] + q0[1]*q1[1] + q0[2]*q1[2] + q0[3]*q1[3]) < 0.0:
-        q1 = wp.quat(-q1[0], -q1[1], -q1[2], -q1[3])
-    q = wp.quat_slerp(q0, q1, theta)
+    q = wp.quat_slerp(in_local_pose0[idx].q, in_local_pose1[idx].q, theta)
     out_result[idx] = wp.transform(t, q)
 
 
