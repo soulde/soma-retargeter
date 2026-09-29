@@ -12,9 +12,9 @@ The rest skeleton (joint names, parents, zero-pose offsets) is read from
 SMPL-X neutral body model with ``scripts/export_smplx_skeleton.py``. No smplx
 or torch dependency is needed at runtime.
 
-SMPL-X data is Y-up with forward +Z; soma-retargeter skeletons are Z-up with
-forward -Y. A -90 degree rotation about X maps one to the other, so it is
-baked into the root joint of both the rest pose and every animation frame.
+SMPL-X data is Y-up with forward +Z. Its own 22-joint skeleton and animation
+are expressed in the pipeline's Z-up, forward -Y coordinate frame by rotating
+the root; the joint hierarchy remains SMPL-X.
 """
 
 import json
@@ -24,8 +24,8 @@ import numpy as np
 import warp as wp
 from scipy.spatial.transform import Rotation as R
 
-import soma_retargeter.utils.io_utils as io_utils
-from soma_retargeter.animation.animation_buffer import AnimationBuffer, create_animation_buffer_for_skeleton
+import soma_retargeter.io.utils as io_utils
+from soma_retargeter.animation.animation_buffer import AnimationBuffer
 from soma_retargeter.animation.skeleton import Skeleton
 
 NUM_BODY_JOINTS = 22  # pelvis + 21 joints driven by pose_body
@@ -131,7 +131,7 @@ def detect_up_axis_for_files(npz_files) -> str:
     return votes.most_common(1)[0][0]
 
 
-def load_smplx_npz(npz_file: str, input_skeleton: Skeleton | None = None):
+def load_smplx_npz(npz_file: str):
     """
     Load an AMASS/SMPL-X animation file and create ``Skeleton`` and
     ``AnimationBuffer`` objects.
@@ -140,13 +140,9 @@ def load_smplx_npz(npz_file: str, input_skeleton: Skeleton | None = None):
         npz_file: Path to the SMPL-X ``.npz`` file. Supports both the split
             stageii convention (``root_orient``, ``pose_body``) and the raw
             AMASS convention (single ``poses`` array).
-        input_skeleton: Optional SOMA skeleton to conform the animation to.
-            The returned motion is always on the canonical SOMA skeleton
-            (see ``convert_animation_to_soma_skeleton``).
-
     Returns:
-        tuple (Skeleton, AnimationBuffer) on the SOMA skeleton, in the SOMA
-        BVH frame convention (the caller applies the soma facing converter).
+        tuple (Skeleton, AnimationBuffer) on the native 22-joint SMPL-X body
+        skeleton. No retargeting or skeleton conversion is performed here.
     """
     data = np.load(npz_file, allow_pickle=True)
 
@@ -183,9 +179,8 @@ def load_smplx_npz(npz_file: str, input_skeleton: Skeleton | None = None):
     up_axis = detect_up_axis(root_orient)
     up_rotation = AXIS_ROTATIONS[up_axis]
 
-    # The motion is first built on a fresh SMPL-X skeleton, then transferred
-    # onto the canonical SOMA skeleton (input_skeleton conforming happens at
-    # the end of the conversion, SOMA rig in / SOMA rig out).
+    # Keep the source's own body skeleton. Robot mapping is handled by the
+    # selected source-to-robot config in the upstream retargeting pipeline.
     skeleton = create_smplx_skeleton(up_axis=up_axis)
 
     # reference_local_transforms is an (num_joints, 7) float32 array of
@@ -215,142 +210,4 @@ def load_smplx_npz(npz_file: str, input_skeleton: Skeleton | None = None):
                 wp.vec3(*offsets[j, :3]), wp.quat(*joint_quat[f, j - 1]))
 
     animation_buffer = AnimationBuffer(skeleton, num_frames, fps, local_transforms)
-    return convert_animation_to_soma_skeleton(skeleton, animation_buffer, input_skeleton)
-
-
-# ================================ #
-#   SOMA-skeleton conversion       #
-# ================================ #
-
-# SMPL-X body joint -> SOMA BVH joint whose global rotation it drives.
-SMPLX_TO_SOMA_JOINT = {
-    "pelvis": "Hips",
-    "spine3": "Chest",
-    "neck": "Neck1",
-    "left_shoulder": "LeftArm", "left_elbow": "LeftForeArm", "left_wrist": "LeftHand",
-    "right_shoulder": "RightArm", "right_elbow": "RightForeArm", "right_wrist": "RightHand",
-    "left_hip": "LeftLeg", "left_knee": "LeftShin", "left_ankle": "LeftFoot", "left_foot": "LeftToeBase",
-    "right_hip": "RightLeg", "right_knee": "RightShin", "right_ankle": "RightFoot", "right_foot": "RightToeBase",
-}
-
-_SOMA_SKELETON_CACHE = None
-_SOMA_ZERO_LOCALS_CACHE = None
-
-
-def _soma_reference_skeleton() -> Skeleton:
-    """The canonical SOMA skeleton (loaded once from the zero-frame BVH)."""
-    global _SOMA_SKELETON_CACHE, _SOMA_ZERO_LOCALS_CACHE
-    if _SOMA_SKELETON_CACHE is None:
-        from soma_retargeter.assets.bvh import load_bvh
-
-        _SOMA_SKELETON_CACHE, zero_anim = load_bvh(
-            str(io_utils.get_config_file("soma", "soma_zero_frame0.bvh")))
-        # The SOMA bind pose (raw offsets) is not a standing pose; frame 0 of
-        # the zero-pose clip carries the channel-level rest pose production
-        # BVHs are expressed against. Undriven joints use these locals.
-        _SOMA_ZERO_LOCALS_CACHE = np.asarray(zero_anim.get_local_transforms(0)).copy()
-    return _SOMA_SKELETON_CACHE
-
-
-def convert_animation_to_soma_skeleton(
-    smplx_skeleton: Skeleton, animation: AnimationBuffer,
-    input_skeleton: Skeleton | None = None,
-):
-    """Transfer an SMPL-X animation onto the canonical SOMA skeleton.
-
-    The retargeting configs are calibrated against the SOMA rig, so — like the
-    LAFAN1 loader — the source is converted with a fixed in-code transform and
-    the soma_to_* configs are reused as-is (no per-source offset calibration).
-
-    Each SOMA joint listed in ``SMPLX_TO_SOMA_JOINT`` is driven so its global
-    rotation equals the SMPL-X joint's global rotation (moved into the SOMA
-    joint frame by the fixed per-joint correction). The Root local is solved
-    so Hips lands on the pelvis target, and undriven joints (spine segments,
-    neck2/head, fingers, eyes) keep the zero-frame clip's local transforms —
-    the channel-level rest pose production BVHs build on. The result is
-    expressed in the SOMA BVH frame (Y-up), exactly like BVH data, so the app
-    applies the same "Mujoco" facing converter to it as to real SOMA input.
-
-    Args:
-        smplx_skeleton: The SMPL-X skeleton the animation is currently on.
-        animation: The animation in the pipeline (Z-up) frame.
-        input_skeleton: Optional existing SOMA skeleton to conform the
-            animation to (all SOMA clips share the same rig).
-
-    Returns:
-        tuple (Skeleton, AnimationBuffer) on the SOMA skeleton.
-    """
-    soma_skel = _soma_reference_skeleton()
-    zero_locals = np.asarray(_SOMA_ZERO_LOCALS_CACHE)
-    num_frames = animation.num_frames
-    soma_idx = {n: i for i, n in enumerate(soma_skel.joint_names)}
-    smplx_idx = {n: i for i, n in enumerate(smplx_skeleton.joint_names)}
-
-    # pipeline frame (Z-up) -> SOMA BVH frame (Y-up); the app's converter
-    # applies the inverse (+90 deg about X) afterwards, like for soma BVHs.
-    rx_inv = R.from_euler("x", -90, degrees=True)
-
-    # Fixed per-joint frame correction, calibrated once from the matched rest
-    # pair (SMPL-X bind pose <-> SOMA zero-frame standing pose). The SOMA rig
-    # binds horizontally, so its standing joint frames differ from the SMPL-X
-    # canonical ones by a constant rotation per joint; without it the driven
-    # globals would fold the skeleton.
-    soma_zero_g = np.asarray(soma_skel.compute_global_transforms(
-        [wp.transform(wp.vec3(*z[:3]), wp.quat(*z[3:7])) for z in zero_locals]))
-    smplx_rest_g = np.asarray(smplx_skeleton.compute_global_transforms(
-        smplx_skeleton.reference_local_transforms))
-    frame_fix = {}
-    for xname, sname in SMPLX_TO_SOMA_JOINT.items():
-        i = smplx_idx[xname]
-        r_soma = R.from_quat(soma_zero_g[soma_idx[sname], 3:7])
-        r_smplx_bvh = rx_inv * R.from_quat(smplx_rest_g[i, 3:7])
-        frame_fix[soma_idx[sname]] = r_soma * r_smplx_bvh.inv()
-
-    parents = soma_skel.parent_indices
-    hips_i = soma_idx["Hips"]
-    hips_local = np.asarray(zero_locals[hips_i], dtype=np.float64)
-    hips_q0 = R.from_quat(hips_local[3:7])
-    hips_t0 = hips_local[:3]
-
-    local_transforms = np.zeros((num_frames, soma_skel.num_joints), dtype=wp.transform)
-    for f in range(num_frames):
-        g = np.asarray(smplx_skeleton.compute_global_transforms(
-            animation.get_local_transforms(f)))
-        tgt = {}
-        for xname, sname in SMPLX_TO_SOMA_JOINT.items():
-            i = smplx_idx[xname]
-            j = soma_idx[sname]
-            tgt[j] = (
-                rx_inv.apply(g[i, :3].astype(np.float64)),
-                frame_fix[j] * (rx_inv * R.from_quat(g[i, 3:7])),
-            )
-
-        grot = [None] * soma_skel.num_joints
-        row = local_transforms[f]
-        for j in range(soma_skel.num_joints):
-            p = parents[j]
-            lz = np.asarray(zero_locals[j], dtype=np.float64)
-            if p == -1:
-                # Solve the Root local so Hips (keeping its zero-frame local)
-                # lands on the pelvis target.
-                hips_pos, hips_rot = tgt[hips_i]
-                root_rot = hips_rot * hips_q0.inv()
-                t = hips_pos - root_rot.apply(hips_t0)
-                row[j] = wp.transform(wp.vec3(*t), wp.quat(*root_rot.as_quat()))
-                grot[j] = root_rot
-            elif j == hips_i:
-                row[j] = wp.transform(wp.vec3(*lz[:3]), wp.quat(*lz[3:7]))
-                grot[j] = grot[p] * hips_q0
-            elif j in tgt:
-                _, rot = tgt[j]
-                local_rot = grot[p].inv() * rot
-                row[j] = wp.transform(wp.vec3(*lz[:3]), wp.quat(*local_rot.as_quat()))
-                grot[j] = rot
-            else:
-                row[j] = wp.transform(wp.vec3(*lz[:3]), wp.quat(*lz[3:7]))
-                grot[j] = grot[p] * R.from_quat(lz[3:7])
-
-    converted = AnimationBuffer(soma_skel, num_frames, animation.sample_rate, local_transforms)
-    if input_skeleton is None:
-        return soma_skel, converted
-    return input_skeleton, create_animation_buffer_for_skeleton(converted, input_skeleton)
+    return skeleton, animation_buffer

@@ -58,9 +58,8 @@ def get_view_transform_for_source(source: str, facing_direction: str):
     so applying the legacy SOMA/MuJoCo facing transform a second time would
     rotate the displayed skeleton and robot by another 90 degrees.
 
-    SMPL-X is likewise normalized to the internal Z-up frame by its loader
-    (the up-axis rotation is baked into the root joint), so it needs the
-    same exemption.
+    SMPL-X and LAFAN1 loaders return their own skeletons normalized to the
+    pipeline's Z-up frame.
     """
     if source in ("lafan1", "smplx"):
         return wp.transform_identity()

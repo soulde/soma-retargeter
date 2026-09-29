@@ -8,30 +8,32 @@ import pathlib
 import time
 import warp as wp
 
+from soma_retargeter.io import utils
+from soma_retargeter.robotics import robot_registry
 import soma_retargeter.utils.math_utils as math_utils
-import soma_retargeter.assets.bvh as bvh_utils
-import soma_retargeter.assets.csv as csv_utils
-import soma_retargeter.assets.smplx as smplx_utils
-import soma_retargeter.utils.io_utils as io_utils
+import soma_retargeter.io.bvh as bvh_utils
+import soma_retargeter.io.csv as csv_utils
 import soma_retargeter.pipelines.utils as pipeline_utils
 
+from soma_retargeter.utils import newton_utils
 from soma_retargeter.renderers.skeleton_renderer import SkeletonRenderer
 from soma_retargeter.renderers.mesh_renderer import SkeletalMeshRenderer
 from soma_retargeter.renderers.coordinate_renderer import CoordinateRenderer
 from soma_retargeter.animation.skeleton import SkeletonInstance
 from soma_retargeter.robotics.human_to_robot_scaler import HumanToRobotScaler
 from soma_retargeter.utils import pose_utils
-from soma_retargeter.utils.space_conversion_utils import (
-    SpaceConverter,
-    get_facing_direction_type_from_str,
-    get_view_transform_for_source,
-)
+from soma_retargeter.utils.space_conversion_utils import SpaceConverter, get_facing_direction_type_from_str
+from soma_retargeter.utils.space_conversion_utils import get_view_transform_for_source
 
 from tqdm import trange
 
 _UI_NEWTON_PANEL_WIDTH  = 320
 _UI_NEWTON_PANEL_MARGIN = 10
 _UI_NEWTON_PANEL_ALPHA  = 0.9
+
+def _ui_scale(ui) -> float:
+    """Return the DPI scale factor for the current display."""
+    return ui.get_font_size() / 13.0  # 13px is imgui's default base size
 _DEFAULT_COLOR = (235.0 / 255.0, 245.0 / 255.0, 112.0 / 255.0)
 
 class Viewer:
@@ -40,15 +42,12 @@ class Viewer:
         self.viewer.vsync = True
         self.config = config
         self.converter = SpaceConverter(get_facing_direction_type_from_str(self.config['retarget_source_facing_direction']))
-        self.source_view_transform = get_view_transform_for_source(
-            self.config.get("retarget_source", "soma"),
-            self.config['retarget_source_facing_direction'],
-        )
+        self._error_message = None
 
         if isinstance(self.viewer, newton.viewer.ViewerNull):
             # Headless mode for batch processing
             return
-        
+
         self.fps      = 60
         self.frame_dt = 1.0 / self.fps
         self.time     = 0.0
@@ -59,29 +58,41 @@ class Viewer:
         self.playback_loop       = True
         self.playback_total_time = 0.0
 
+        retarget_target = config['retarget_target']
         self.retarget_source_options = ['soma', 'smplx', 'lafan1']
-        self.retarget_target_options = pipeline_utils.get_registered_targets()
+        configured_source = config.get('retarget_source', 'soma')
+        if configured_source not in self.retarget_source_options:
+            configured_source = 'soma'
+        self.retarget_source_idx = self.retarget_source_options.index(configured_source)
+        self.retarget_target_options = robot_registry.list_available_source_targets(configured_source)
+        if not self.retarget_target_options:
+            raise ValueError("[ERROR]: No robots with a soma retargeter config found. "
+                             "Use the Robot Configurator to set one up.")
+        if retarget_target not in self.retarget_target_options:
+            if retarget_target in robot_registry.list_available_targets():
+                raise ValueError(f"[ERROR]: Robot '{retarget_target}' has no soma retargeter config. "
+                                 f"Open the Robot Configurator and save configs for it first.")
+            raise ValueError(f"[ERROR]: Unknown robot target: '{retarget_target}'. "
+                             f"Configured targets: {', '.join(self.retarget_target_options)}")
+
+        self.retarget_target = None # Will be set later by _reset_viewer_model()
+        self.retarget_target_idx = self.retarget_target_options.index(retarget_target)
+
         self.retarget_solver_options = ['Newton']
         self.retarget_solver_idx     = 0
-        self.retarget_target_idx     = 0
-        self.retarget_source_idx     = 0
 
         self.show_skeleton_mesh = True
-        self.show_skeleton = self.config.get("retarget_source") == "lafan1"
+        self.show_skeleton = False
         self.show_scaled_skeleton = False
         self.show_skeleton_joint_axes = False
         self.show_gizmos = True
 
         self.viewer.renderer.set_title("BVH to CSV Converter")
-        self.viewer.register_ui_callback(lambda ui: self.gui(ui), position="free")
 
-        if self.config['retarget_target'] in self.retarget_target_options:
-            self.retarget_target_idx = self.retarget_target_options.index(self.config['retarget_target'])
-
+        self.model = None
+        self.state = None
         self.num_robots = 1
         self.robot_offsets = [wp.transform(wp.vec3(0.0, i - (self.num_robots - 1) / 2.0, 0.0), wp.quat_identity()) for i in range(self.num_robots)]
-        self.build_robot_model(self.retarget_target_options[self.retarget_target_idx])
-
         self.coordinate_renderer = CoordinateRenderer()
         self.skeleton = None
         self.skeleton_renderer = None
@@ -96,46 +107,109 @@ class Viewer:
         self.skeleton_instances = []
         self.robot_csv_animation_buffers = [None for _ in range(self.num_robots)]
 
-    def build_robot_model(self, retarget_target: str):
-        """Build the Newton preview model for the given target robot and push it to the viewer."""
-        robot_builder = newton.ModelBuilder()
-        robot_builder.add_mjcf(str(pipeline_utils.get_robot_mjcf_path(retarget_target)))
+    def _capture_camera_state(self):
+        # Snapshot the camera pose to a plain dict so it can survive a model rebuild
+        camera = self.viewer.camera
+        return {
+            "pos": [float(camera.pos[i]) for i in range(3)],
+            "pivot": [float(camera.pivot[i]) for i in range(3)],
+            "pitch": float(camera.pitch),
+            "yaw": float(camera.yaw),
+            "fov": float(camera.fov),
+            "near": float(camera.near),
+            "far": float(camera.far),
+        }
+
+    def _apply_camera_state(self, camera_state):
+        # Restore the camera pose from a previously captured state; no-op if None
+        if camera_state is None:
+            return
+
+        camera = self.viewer.camera
+        vec3_type = type(camera.pos)
+        camera.pos = vec3_type(*camera_state["pos"])
+        camera.pivot = vec3_type(*camera_state["pivot"])
+        camera.pitch = camera_state["pitch"]
+        camera.yaw = camera_state["yaw"]
+        camera.fov = camera_state["fov"]
+        camera.near = camera_state["near"]
+        camera.far = camera_state["far"]
+
+    def _refresh_robot_list(self):
+        robot_registry.registry.reload()
+        current = self.retarget_target_options[self.retarget_target_idx] if self.retarget_target_options else None
+        names = robot_registry.list_available_source_targets(
+            self.retarget_source_options[self.retarget_source_idx])
+        self.retarget_target_options = names
+        if current in names:
+            self.retarget_target_idx = names.index(current)
+        else:
+            self.retarget_target_idx = 0
+
+    def _reset_viewer_model(self):
+        # Reset model based on the currently selected robot target
+        if not self.retarget_target_options:
+            return
+        selected_target = self.retarget_target_options[self.retarget_target_idx]
+        if self.retarget_target == selected_target:
+            return
+
+        camera_state = self._capture_camera_state()
+        self.retarget_target = selected_target
+        self.robot_builder = pipeline_utils.create_robot_builder(self.retarget_target)
+        self.actuated_joint_names = newton_utils.get_filtered_joint_names(
+            self.robot_builder, [newton.JointType.REVOLUTE])
 
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
+        self.robot_shape_start = builder.shape_count
+        self.robot_shape_count = self.robot_builder.shape_count
         for _ in range(self.num_robots):
-            builder.add_builder(robot_builder, wp.transform_identity())
+            builder.add_world(self.robot_builder, wp.transform_identity())
         self.model = builder.finalize()
-
-        # The viewer's set_model() only accepts a single call; reset its internal
-        # model state (and stale GL shape instancers) so the robot can be swapped.
-        self.viewer.model = None
-        if hasattr(self.viewer, '_shape_instances'):
-            self.viewer._shape_instances.clear()
-        if hasattr(self.viewer, 'objects'):
-            from newton._src.viewer.gl.opengl import MeshInstancerGL
-            for key in [k for k, v in self.viewer.objects.items() if isinstance(v, MeshInstancerGL)]:
-                del self.viewer.objects[key]
-        # Only set at construction time otherwise; without this the new
-        # instancers never receive colors/materials and render black.
-        if hasattr(self.viewer, 'model_changed'):
-            self.viewer.model_changed = True
+        end = self.robot_shape_start + self.robot_shape_count
+        self.robot_base_shape_colors = self.model.shape_color.numpy()[self.robot_shape_start:end]
+        self.robot_shape_min_channel = self.robot_base_shape_colors.min(axis=1)
+        self.robot_shape_channel_spread = self.robot_base_shape_colors.max(axis=1) - self.robot_shape_min_channel
 
         self.viewer.set_model(self.model)
         self.viewer.set_world_offsets([0, 0, 0])
+        self._apply_camera_state(camera_state)
         self.state = self.model.state()
 
-        self.g1_num_joint_q = self.model.joint_coord_count // self.model.articulation_count
-        self.g1_joint_q_offsets = [int(i * self.g1_num_joint_q) for i in range(self.model.articulation_count)]
-        self.g1_default_joint_q_values = self.model.joint_q.numpy()
+        self.robot_num_joint_q = self.model.joint_coord_count // self.model.articulation_count
+        self.robot_joint_q_offsets = [int(i * self.robot_num_joint_q) for i in range(self.model.articulation_count)]
+        self.robot_default_joint_q_values = self.model.joint_q.numpy()
+        self.robot_csv_animation_buffers = [None for _ in range(self.num_robots)]
+        self.viewer.register_ui_callback(lambda ui: self.gui(ui), position="free")
 
     def gui(self, ui):
         self.ui_playback_controls(ui)
         self.ui_scene_options(ui)
+        self._ui_error_popup(ui)
+
+    def _ui_error_popup(self, ui):
+        if self._error_message:
+            ui.open_popup("##error_msg")
+        result = ui.begin_popup_modal("##error_msg", None,
+                                      ui.WindowFlags_.always_auto_resize |
+                                      ui.WindowFlags_.no_title_bar)
+        if not result[0]:
+            return
+        ui.text(self._error_message or "")
+        ui.spacing()
+        btn_w = 120
+        avail = ui.get_content_region_avail().x
+        ui.set_cursor_pos_x(ui.get_cursor_pos_x() + (avail - btn_w) / 2)
+        if ui.button("OK", ui.ImVec2(btn_w, 0)):
+            self._error_message = None
+            ui.close_current_popup()
+        ui.end_popup()
 
     def load_csv_file(self, path):
-        self.robot_csv_animation_buffers[0] = csv_utils.load_csv(
-            path, csv_config=csv_utils.get_csv_config_for_target(self.retarget_target_options[self.retarget_target_idx]))
+        target = self.retarget_target_options[self.retarget_target_idx]
+        config = csv_utils.get_csv_config_for_target(target)
+        self.robot_csv_animation_buffers[0] = csv_utils.load_csv(path, csv_config=config)
         self.compute_playback_total_time()
 
     def load_bvh_file(self, path):
@@ -150,17 +224,19 @@ class Viewer:
         if self.coordinate_renderer is not None:
             self.coordinate_renderer.clear(self.viewer)
 
-        self.skeleton, animation = self.load_motion_file(path)
+        source = self.retarget_source_options[self.retarget_source_idx]
+        self.skeleton, animation = pipeline_utils.motion_source_descriptor(source).load(path)
         self.skeleton_renderer = SkeletonRenderer(self.skeleton, [0])
-        self.skeleton_instances = [SkeletonInstance(self.skeleton, _DEFAULT_COLOR, self.source_view_transform)]
+        source_xform = get_view_transform_for_source(
+            source, self.config['retarget_source_facing_direction'])
+        self.skeleton_instances = [SkeletonInstance(self.skeleton, _DEFAULT_COLOR, source_xform)]
         self.animation_offsets = [wp.transform_identity()] * len(self.skeleton_instances)
         self.animation_buffers = [animation]
 
-        source_type = pipeline_utils.get_source_type_from_str(
-            self.retarget_source_options[self.retarget_source_idx])
+        source_type = pipeline_utils.get_source_type_from_str(source)
         self.skeletal_mesh = pipeline_utils.get_source_model_mesh(source_type, self.skeleton)
-        self.skeletal_mesh_renderer = (
-            SkeletalMeshRenderer(self.skeletal_mesh) if self.skeletal_mesh is not None else None)
+        self.skeletal_mesh_renderer = (SkeletalMeshRenderer(self.skeletal_mesh)
+                                       if self.skeletal_mesh is not None else None)
         self._build_scaled_skeleton_overlay()
         self.compute_playback_total_time()
 
@@ -171,72 +247,49 @@ class Viewer:
         self.scaled_skeleton_renderer = None
         self.scaled_skeleton_instances = []
 
-    def _build_scaled_skeleton_overlay(self, scaler=None):
+    def _build_scaled_skeleton_overlay(self):
         self._clear_scaled_skeleton_overlay()
         if self.skeleton is None or not self.skeleton_instances:
-            self.human_robot_scaler = None
-            self.show_scaled_skeleton = False
             return
-
         try:
-            if scaler is None:
-                source = self.retarget_source_options[self.retarget_source_idx]
-                source_type = pipeline_utils.get_source_type_from_str(source)
-                retargeter_config = pipeline_utils.get_retargeter_config(
-                    source_type,
-                    self.retarget_target_options[self.retarget_target_idx],
-                )
-                scaler = HumanToRobotScaler(
-                    self.skeleton,
-                    retargeter_config["model_height"],
-                    pipeline_utils.resolve_config_path(
-                        retargeter_config["human_robot_scaler_config"]),
-                )
+            source = self.retarget_source_options[self.retarget_source_idx]
+            target = self.retarget_target_options[self.retarget_target_idx]
+            config = pipeline_utils.get_retargeter_config(source, target)
+            scaler_path = os.path.join(
+                robot_registry.get_robot_asset_root(target),
+                config['human_robot_scaler_config'])
+            self.human_robot_scaler = HumanToRobotScaler(self.skeleton, scaler_path)
+            self.scaled_skeleton = self.human_robot_scaler.create_scaled_skeleton(
+                self.skeleton_instances[0])
+            self.scaled_skeleton_renderer = SkeletonRenderer(self.scaled_skeleton)
+            self.scaled_skeleton_instances = [
+                SkeletonInstance(self.scaled_skeleton, (0.25, 0.85, 1.0), instance.xform)
+                for instance in self.skeleton_instances
+            ]
         except (FileNotFoundError, KeyError, ValueError) as error:
             self.human_robot_scaler = None
             self.show_scaled_skeleton = False
             print(f"[WARNING]: Scaled skeleton display unavailable: {error}")
-            return
-
-        self.human_robot_scaler = scaler
-        self.scaled_skeleton = scaler.create_scaled_skeleton(self.skeleton_instances[0])
-        self.scaled_skeleton_renderer = SkeletonRenderer(self.scaled_skeleton)
-        scaled_color = (0.25, 0.85, 1.0)
-        self.scaled_skeleton_instances = [
-            SkeletonInstance(self.scaled_skeleton, scaled_color, source_instance.xform)
-            for source_instance in self.skeleton_instances
-        ]
 
     def _draw_scaled_skeleton_overlay(self, index):
         if (not self.show_scaled_skeleton or self.human_robot_scaler is None
                 or self.scaled_skeleton_renderer is None):
             return
-
         source_instance = self.skeleton_instances[index]
         scaled_instance = self.scaled_skeleton_instances[index]
         scaled_instance.xform = self.robot_offsets[index]
-        global_transforms = self.human_robot_scaler.compute_effectors_from_skeleton(
+        effectors = self.human_robot_scaler.compute_effectors_from_skeleton(
             source_instance, True)
-        robot_root = self.robot_offsets[index]
-        local_transforms = pose_utils.compute_local_pose(
-            self.scaled_skeleton,
-            global_transforms,
-            robot_root,
-        )
-        scaled_instance.set_local_transforms(local_transforms)
+        scaled_instance.set_local_transforms(pose_utils.compute_local_pose(
+            self.scaled_skeleton, effectors, self.robot_offsets[index]))
         self.scaled_skeleton_renderer.draw(self.viewer, scaled_instance, 1000 + index)
-
-    def load_motion_file(self, path):
-        """Load a motion using the selected source adapter."""
-        source = self.retarget_source_options[self.retarget_source_idx]
-        return pipeline_utils.motion_source_descriptor(source).load(str(path))
 
     def compute_playback_total_time(self):
         bvh_max_time = 0.0
         for buffer in self.animation_buffers:
             if buffer is not None:
                 bvh_max_time = max(bvh_max_time, buffer.num_frames * (1 / buffer.sample_rate))
-        
+
         csv_max_time = 0.0
         for buffer in self.robot_csv_animation_buffers:
             if buffer is not None:
@@ -249,7 +302,7 @@ class Viewer:
         for i in range(self.num_robots):
             robot_offset = self.robot_offsets[i]
 
-            joint_q_offset = self.g1_joint_q_offsets[i]
+            joint_q_offset = self.robot_joint_q_offsets[i]
             if self.robot_csv_animation_buffers[i] is not None:
                 buffer = self.robot_csv_animation_buffers[i]
                 # Apply visual offset
@@ -257,23 +310,24 @@ class Viewer:
                 buffer.xform = robot_offset
 
                 data = buffer.sample(self.playback_time)
-                wp.copy(self.model.joint_q, wp.array(data, dtype=wp.float32), joint_q_offset, 0, self.g1_num_joint_q)
+                wp.copy(self.model.joint_q, wp.array(data, dtype=wp.float32), joint_q_offset, 0, self.robot_num_joint_q)
                 buffer.xform = prev_xform
             else:
                 root_tx = wp.mul(
                     robot_offset,
-                    wp.transform(*self.g1_default_joint_q_values[joint_q_offset:(joint_q_offset + 7)]))
+                    wp.transform(*self.robot_default_joint_q_values[joint_q_offset:(joint_q_offset + 7)]))
 
                 wp.copy(
                     self.model.joint_q,
-                    wp.array(self.g1_default_joint_q_values[joint_q_offset:(joint_q_offset + self.g1_num_joint_q)], dtype=wp.float32),
+                    wp.array(self.robot_default_joint_q_values[joint_q_offset:(joint_q_offset + self.robot_num_joint_q)], dtype=wp.float32),
                     joint_q_offset,
-                    0, self.g1_num_joint_q)
+                    0, self.robot_num_joint_q)
                 wp.copy(self.model.joint_q, wp.array(root_tx[0:7], dtype=wp.float32), joint_q_offset, 0, 7)
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state, None)
 
     def step(self):
+        self._reset_viewer_model()
         self.time += self.frame_dt
         if self.is_playing:
             self.playback_time += self.frame_dt * self.playback_speed
@@ -312,13 +366,13 @@ class Viewer:
                     self.skeletal_mesh_renderer.draw(self.viewer, self.skeleton_instances[i], self.skeleton_instances[i].color, i)
                 self._draw_scaled_skeleton_overlay(i)
                 self.skeleton_instances[i].xform = prev_xform
-        
+
         if self.show_gizmos:
             for i, offset in enumerate(self.robot_offsets):
                 self.viewer.log_gizmo(f"robot_offset{i}", offset)
             for i, offset in enumerate(self.animation_offsets):
                 self.viewer.log_gizmo(f"animation_offset{i}", offset)
-        
+
         self.viewer.log_state(self.state)
         self.viewer.end_frame()
 
@@ -335,18 +389,25 @@ class Viewer:
         retarget_source = self.retarget_source_options[self.retarget_source_idx]
         retarget_target = self.retarget_target_options[self.retarget_target_idx]
         retarget_solver = self.retarget_solver_options[self.retarget_solver_idx]
-        
+
         if (retarget_solver == 'Newton'):
-            import soma_retargeter.pipelines.newton_pipeline as newton_pipeline
-            pipeline = newton_pipeline.NewtonPipeline(self.skeleton, retarget_source, retarget_target)
+            import soma_retargeter.pipelines.soma_retargeting_pipeline as soma_retargeting_pipeline
+            try:
+                pipeline = soma_retargeting_pipeline.SomaRetargetingPipeline(self.skeleton, retarget_source, retarget_target)
+            except Exception as error:
+                message = f"[ERROR]: {error}"
+                print(message)
+                self._error_message = message
+                self.robot_csv_animation_buffers[0] = None
+                self.compute_playback_total_time()
+                return
         else:
             raise(ValueError(f"[ERROR]: Unknown retargeter solver [{retarget_solver}"))
-        
+
         r_offsets = [wp.transform(wp.vec3(0,0,0), wp.quat(*s.xform[3:7])) for s in self.skeleton_instances]
-        self._build_scaled_skeleton_overlay(pipeline.human_robot_scaler)
         pipeline.add_input_motions(self.animation_buffers, r_offsets, True)
         buffers = pipeline.execute()
-        
+
         if buffers is not None:
             t_offsets = [wp.transform(wp.vec3(*s.xform[:3]), wp.quat_identity()) for s in self.skeleton_instances]
             for i, buffer in enumerate(buffers):
@@ -357,33 +418,66 @@ class Viewer:
     def ui_scene_options(self, ui):
         import tkinter as tk
         from tkinter import filedialog as tk_filedialog
-        
+
         viewport = ui.get_main_viewport()
 
-        panel_size = ui.ImVec2(320, 320)
+        _s = _ui_scale(ui)
+        _panel_w = int(_UI_NEWTON_PANEL_WIDTH * _s)
+        _margin  = int(_UI_NEWTON_PANEL_MARGIN * _s)
+        panel_size = ui.ImVec2(_panel_w, int(450 * _s))
         ui.set_next_window_pos(
             ui.ImVec2(
-                viewport.size.x - _UI_NEWTON_PANEL_MARGIN - panel_size.x,
-                viewport.size.y - _UI_NEWTON_PANEL_MARGIN - panel_size.y))
-        
+                viewport.size.x - _margin - panel_size.x,
+                viewport.size.y - _margin - panel_size.y))
+
         ui.set_next_window_size(panel_size)
         ui.set_next_window_bg_alpha(_UI_NEWTON_PANEL_ALPHA)
 
         ui.begin("Scene Options", flags=(ui.WindowFlags_.no_collapse | ui.WindowFlags_.no_resize))
         ui.separator()
 
+        ui.text("Robot Options")
+        ui.set_next_item_width(-60)
+        if self.retarget_target_options:
+            target_changed, self.retarget_target_idx = ui.combo(
+                "##target", self.retarget_target_idx, self.retarget_target_options)
+            if target_changed and self.skeleton is not None:
+                self._build_scaled_skeleton_overlay()
+        ui.same_line()
+        if ui.button("Reload"):
+            self._refresh_robot_list()
+
         # Motion options
         if ui.collapsing_header("Motion", flags=ui.TreeNodeFlags_.default_open):
             ui.separator()
-            ui.align_text_to_frame_padding()
-            ui.text("Source:")
+            ui.text("Dataset:")
             ui.same_line()
-            ui.set_next_item_width(100)
-            changed, self.retarget_source_idx = ui.combo(
-                "##RetargetSource", self.retarget_source_idx, self.retarget_source_options)
-
+            source_changed, self.retarget_source_idx = ui.combo("##source", self.retarget_source_idx, self.retarget_source_options)
+            if source_changed:
+                previous_target = (self.retarget_target_options[self.retarget_target_idx]
+                                   if self.retarget_target_options else None)
+                names = robot_registry.list_available_source_targets(
+                    self.retarget_source_options[self.retarget_source_idx])
+                if names:
+                    self.retarget_target_options = names
+                    self.retarget_target_idx = names.index(previous_target) if previous_target in names else 0
+                self.animation_buffers = []
+                self.skeleton_instances = []
+                self.skeleton = None
+                if self.skeleton_renderer is not None:
+                    self.skeleton_renderer.clear(self.viewer)
+                self.skeleton_renderer = None
+                if self.skeletal_mesh_renderer is not None:
+                    self.skeletal_mesh_renderer.clear(self.viewer)
+                self.skeletal_mesh_renderer = None
+                self.coordinate_renderer.clear(self.viewer)
+                self.human_robot_scaler = None
+                self._clear_scaled_skeleton_overlay()
+                self.compute_playback_total_time()
             ui.align_text_to_frame_padding()
-            ui.text("Motion:")
+            source_extension = pipeline_utils.motion_source_descriptor(
+                self.retarget_source_options[self.retarget_source_idx]).extension
+            ui.text("Motion File:")
             ui.same_line()
 
             ui.push_id(100)
@@ -392,8 +486,8 @@ class Viewer:
                 root.withdraw()
                 bvh_path = tk_filedialog.askopenfilename(
                     title='Load Motion File',
-                    defaultextension=".bvh",
-                    filetypes=[('Motion files', '*.bvh *.npz')])
+                    defaultextension=source_extension,
+                    filetypes=[(f'{source_extension[1:].upper()} files', f'*{source_extension}')])
 
                 if bvh_path:
                     self.load_bvh_file(bvh_path)
@@ -405,14 +499,14 @@ class Viewer:
             ui.same_line()
             if ui.button("Retarget"):
                 self.retarget_motion()
-            
+
             if (len(self.animation_buffers) == 0):
                 ui.end_disabled()
 
             ui.align_text_to_frame_padding()
             ui.text("CSV Motion:")
             ui.same_line()
-            
+
             ui.push_id(200)
             if ui.button("Load"):
                 root = tk.Tk()
@@ -439,23 +533,13 @@ class Viewer:
                     defaultextension=".csv",
                     filetypes=[("CSV files", "*.csv")])
                 if save_path:
-                    csv_utils.save_csv(save_path, self.robot_csv_animation_buffers[0],
-                        csv_utils.get_csv_config_for_target(self.retarget_target_options[self.retarget_target_idx]))
+                    target = self.retarget_target_options[self.retarget_target_idx]
+                    csv_utils.save_csv(
+                        save_path, self.actuated_joint_names, self.robot_csv_animation_buffers[0],
+                        csv_config=csv_utils.get_csv_config_for_target(target))
 
             if self.robot_csv_animation_buffers[0] is None:
                 ui.end_disabled()
-
-            # Retarget target selection
-            ui.align_text_to_frame_padding()
-            ui.text("Retarget Target:")
-            ui.same_line()
-            ui.set_next_item_width(150)
-            changed, self.retarget_target_idx = ui.combo("##RetargetTarget", self.retarget_target_idx, self.retarget_target_options)
-            if changed:
-                self.robot_csv_animation_buffers = [None for _ in range(self.num_robots)]
-                self.build_robot_model(self.retarget_target_options[self.retarget_target_idx])
-                if self.skeleton is not None:
-                    self._build_scaled_skeleton_overlay()
 
         # Visibility options
         ui.spacing()
@@ -468,12 +552,8 @@ class Viewer:
             changed, self.show_skeleton = ui.checkbox("Show Skeleton", self.show_skeleton)
             if changed and self.skeleton_renderer is not None:
                 self.skeleton_renderer.clear(self.viewer)
-            if self.human_robot_scaler is None:
-                ui.begin_disabled()
             changed, self.show_scaled_skeleton = ui.checkbox(
                 "Show Scaled Skeleton", self.show_scaled_skeleton)
-            if self.human_robot_scaler is None:
-                ui.end_disabled()
             if changed and self.scaled_skeleton_renderer is not None:
                 self.scaled_skeleton_renderer.clear(self.viewer)
             changed, self.show_skeleton_joint_axes = ui.checkbox("Show Joint Axes", self.show_skeleton_joint_axes)
@@ -488,11 +568,14 @@ class Viewer:
 
     def ui_playback_controls(self, ui):
         viewport = ui.get_main_viewport()
-        
-        panel_height = 105
-        panel_width = viewport.size.x - 2 * (2 * _UI_NEWTON_PANEL_MARGIN + _UI_NEWTON_PANEL_WIDTH)
-        
-        ui.set_next_window_pos(ui.ImVec2(_UI_NEWTON_PANEL_WIDTH + _UI_NEWTON_PANEL_MARGIN, viewport.size.y - _UI_NEWTON_PANEL_MARGIN - panel_height))
+
+        _s = _ui_scale(ui)
+        _panel_w = int(_UI_NEWTON_PANEL_WIDTH * _s)
+        _margin  = int(_UI_NEWTON_PANEL_MARGIN * _s)
+        panel_height = int(105 * _s)
+        panel_width = viewport.size.x - 2 * (2 * _margin + _panel_w)
+
+        ui.set_next_window_pos(ui.ImVec2(_panel_w + _margin, viewport.size.y - _margin - panel_height))
         ui.set_next_window_size(ui.ImVec2(panel_width, panel_height))
         ui.set_next_window_bg_alpha(_UI_NEWTON_PANEL_ALPHA)
 
@@ -501,7 +584,7 @@ class Viewer:
         ui.align_text_to_frame_padding()
         ui.text("Time (s):")
         ui.same_line()
-        ui.set_next_item_width(panel_width - 150)
+        ui.set_next_item_width(panel_width - int(150 * _s))
         changed, new_time = ui.slider_float(
             "##TimeSlider",
             self.playback_time,
@@ -512,7 +595,7 @@ class Viewer:
             self.playback_time = wp.clamp(new_time, 0.0, self.playback_total_time)
         ui.same_line()
         ui.text_colored(ui.ImVec4(0.6, 0.8, 1.0, 1.0), f"{self.playback_total_time:.2f}s")
-        
+
         self.is_playing = not ui.button("Pause") if self.is_playing else ui.button("Play ")
         ui.same_line()
 
@@ -520,7 +603,7 @@ class Viewer:
         ui.align_text_to_frame_padding()
         ui.text("Speed")
         ui.same_line()
-        ui.set_next_item_width(100)
+        ui.set_next_item_width(int(100 * _s))
         changed, new_speed = ui.slider_float(
             "##SpeedSlider",
             self.playback_speed,
@@ -549,46 +632,36 @@ class Viewer:
             export_path.mkdir(parents=True, exist_ok=True)
 
         batch_size = self.config['batch_size']
-        retarget_source = self.config['retarget_source']
-        try:
-            source_descriptor = pipeline_utils.motion_source_descriptor(retarget_source)
-        except ValueError as error:
-            print(f"[ERROR]: {error}")
-            exit(-1)
-        motion_extension = source_descriptor.extension
-
-        motion_files = [p for p in import_path.rglob(f"*{motion_extension}") if not p.name.endswith("_stagei.npz")]
-        if (len(motion_files) == 0):
-            print(f"[ERROR]: Import folder {str(import_path)}, does not contain any {motion_extension} files.")
+        bvh_files = list(import_path.rglob("*.bvh"))
+        if (len(bvh_files) == 0):
+            print(f"[ERROR]: Import folder {str(import_path)}, does not contain any BVH files.")
             exit(-1)
 
         # Sort files based on size (largest first)
-        motion_files.sort(key=lambda p: p.stat().st_size, reverse=True)
-        batches = [motion_files[i:i + batch_size] for i in range(0, len(motion_files), batch_size)]
+        bvh_files.sort(key=lambda p: p.stat().st_size, reverse=True)
+        batches = [bvh_files[i:i + batch_size] for i in range(0, len(bvh_files), batch_size)]
 
         # All skeletons should be the same, load one as our reference
-        if retarget_source == 'smplx' or retarget_source == 'lafan1':
-            # Both loaders normalize their sources in code (smplx onto the
-            # SOMA skeleton, lafan1 into the pipeline frame).
-            ref_skeleton, _ = source_descriptor.load(str(batches[0][0]))
-        else:
-            bvh_importer = bvh_utils.BVHImporter()
-            ref_skeleton, _ = bvh_importer.create_skeleton(batches[0][0])
+        bvh_importer = bvh_utils.BVHImporter()
+        bvh_skeleton, _ = bvh_importer.create_skeleton(batches[0][0])
 
-        # Sources whose loaders already emit motion in the pipeline's Z-up
-        # frame skip the SOMA BVH facing converter.
-        if source_descriptor.root_transform_is_identity:
-            bvh_tx_converter = wp.transform_identity()
-        else:
-            bvh_tx_converter = self.converter.transform(wp.transform_identity())
-        expected_num_joints = ref_skeleton.num_joints
+        bvh_tx_converter = self.converter.transform(wp.transform_identity())
+        expected_num_joints = bvh_skeleton.num_joints
 
+        retarget_source = self.config['retarget_source']
         retarget_solver = self.config['retargeter']
         retarget_target = self.config["retarget_target"]
         retarget_pipeline = None
         if (retarget_solver == 'Newton'):
-            import soma_retargeter.pipelines.newton_pipeline as newton_pipeline
-            retarget_pipeline = newton_pipeline.NewtonPipeline(ref_skeleton, retarget_source, retarget_target)
+            import soma_retargeter.pipelines.soma_retargeting_pipeline as soma_retargeting_pipeline
+            try:
+                retarget_pipeline = soma_retargeting_pipeline.SomaRetargetingPipeline(
+                    bvh_skeleton, retarget_source, retarget_target)
+            except Exception as error:
+                print(f"[ERROR]: {error}")
+                exit(-1)
+            actuated_joint_names = newton_utils.get_filtered_joint_names(
+                retarget_pipeline.robot_builder, [newton.JointType.REVOLUTE])
         if retarget_pipeline is None:
             print(f"[ERROR]: Invalid retarget solver selected [{retarget_solver}]. Use 'Newton'.")
             exit(-1)
@@ -598,16 +671,16 @@ class Viewer:
 
         for i, batch in enumerate(batches):
             print(f"[INFO]: Processing batch {i+1} of {len(batches)}")
-            
+
             print(f"[INFO]: Loading {len(batch)} animations...")
             animations = []
             for file_path in batch:
-                _, animation = source_descriptor.load(str(file_path), ref_skeleton)
+                _, animation = bvh_utils.load_bvh(file_path, bvh_skeleton)
                 # All animations should be on the same skeleton
                 assert expected_num_joints == animation.skeleton.num_joints, (
                     f"[ERROR]: Unexpected number of joints in input motion. Expected {expected_num_joints}, "
                     f"got {animation.skeleton.num_joints}")
-                
+
                 animations.append(animation)
             assert(len(animations) == len(batch))
 
@@ -622,8 +695,7 @@ class Viewer:
                     csv_buffer = csv_buffers[i]
                     dst_path = export_path / pathlib.Path(batch[i]).relative_to(import_path).with_suffix(".csv")
                     dst_path.parent.mkdir(parents=True, exist_ok=True)
-                    csv_utils.save_csv(dst_path, csv_buffer,
-                        csv_utils.get_csv_config_for_target(retarget_target))
+                    csv_utils.save_csv(dst_path, actuated_joint_names, csv_buffer)
 
             nb_retargeted_motions += len(batch)
 
@@ -650,7 +722,16 @@ def main():
         print(f"[ERROR]: Main config json file not found: {args.config}")
         exit(1)
 
-    config = io_utils.load_json(args.config)
+    if args.viewer != "null" and hasattr(viewer, "hide_loading_splash"):
+        viewer.hide_loading_splash()
+
+    config = utils.load_json(args.config)
+    custom_paths = config.get('extra_robot_paths', [])
+    if isinstance(custom_paths, str):
+        custom_paths = [custom_paths]
+    for path in custom_paths:
+        robot_registry.register_robots_path(path)
+
     with wp.ScopedDevice(args.device):
         app = Viewer(viewer, config)
         if not isinstance(viewer, newton.viewer.ViewerNull):

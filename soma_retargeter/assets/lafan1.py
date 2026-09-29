@@ -8,7 +8,7 @@ from scipy.spatial.transform import Rotation
 
 from soma_retargeter.animation.animation_buffer import create_animation_buffer_for_skeleton
 from soma_retargeter.animation.skeleton import Skeleton
-from soma_retargeter.assets.bvh import load_bvh
+from soma_retargeter.io.bvh import load_bvh
 
 
 STANDARD_LAFAN1_JOINT_NAMES = (
