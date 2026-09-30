@@ -596,7 +596,8 @@ class Viewer:
         ui.same_line()
         ui.text_colored(ui.ImVec4(0.6, 0.8, 1.0, 1.0), f"{self.playback_total_time:.2f}s")
 
-        self.is_playing = not ui.button("Pause") if self.is_playing else ui.button("Play ")
+        if ui.button("Pause" if self.is_playing else "Play"):
+            self.is_playing = not self.is_playing
         ui.same_line()
 
         # Speed slider
