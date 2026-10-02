@@ -1,17 +1,40 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+import newton
+import warp as wp
 from dataclasses import dataclass
-from enum import IntEnum, auto
-from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable
 
-import soma_retargeter.utils.io_utils as io_utils
-import soma_retargeter.assets.usd as usd_utils
-from soma_retargeter.assets.bvh import load_bvh
+from enum import IntEnum, auto
+
+import soma_retargeter.io.utils as utils
+import soma_retargeter.io.usd as usd_utils
+import soma_retargeter.utils.newton_utils as newton_utils
 from soma_retargeter.assets.lafan1 import load_lafan1_bvh
 from soma_retargeter.assets.smplx import load_smplx_npz
+from soma_retargeter.io.bvh import load_bvh
 
+from soma_retargeter.robotics.robot_registry import registry as _robot_registry
+from pathlib import Path
+from soma_retargeter.robotics.robot_registry import TargetRobot, get_source_config_path
+
+register_target = _robot_registry.register
+get_registered_targets = _robot_registry.list_names
+
+
+def _get_registered_robot(target):
+    """Compatibility lookup for installed packages using the original API."""
+    entry = _robot_registry.get(target)
+    return TargetRobot(
+        name=entry.name,
+        retargeter_config=entry.retarget_configs.get("soma", ""),
+        get_config_base=lambda: Path(entry.manifest_dir),
+        get_mjcf_path=lambda: Path(get_target_asset_path(target)["xml_path"]),
+        retargeter_configs=entry.retarget_configs,
+        csv_config_factory=entry.csv_config_factory,
+    )
 
 class SourceType(IntEnum):
     """Enumeration of supported source model types."""
@@ -20,138 +43,36 @@ class SourceType(IntEnum):
     LAFAN1 = auto()
 
 _SOURCE_TYPE_TO_STR = {
-    SourceType.SOMA : "soma",
-    SourceType.SMPLX : "smplx",
-    SourceType.LAFAN1 : "lafan1",
+    SourceType.SOMA: "soma",
+    SourceType.SMPLX: "smplx",
+    SourceType.LAFAN1: "lafan1",
 }
 _STR_TO_SOURCE_TYPE = {s : t for t, s in _SOURCE_TYPE_TO_STR.items()}
 
+_SOURCE_EXTENSIONS = {"soma": ".bvh", "smplx": ".npz", "lafan1": ".bvh"}
 
-@dataclass
-class TargetRobot:
-    """
-    Description of a retargeting target robot.
-
-    Robots register through ``register_target``; built-ins are registered at
-    import time and external packages register through the
-    ``soma_retargeter.targets`` entry point group.
-
-    Attributes:
-        name: Target name used in configs and the UI (e.g. "unitree_g1").
-        retargeter_config: Retargeter config path relative to the robot's
-            config base directory.
-        get_config_base: Callable returning the directory that contains the
-            ``<name>/...`` config subtree.
-        get_mjcf_path: Callable returning the path to the robot MJCF model.
-    """
-    name: str
-    retargeter_config: str
-    get_config_base: Callable[[], Path]
-    get_mjcf_path: Callable[[], Path]
-    retargeter_configs: dict[str, str] | None = None
-    csv_config_factory: Callable[[], object] | None = None
+def motion_source_descriptor(source):
+    """Return the legacy source loader contract used by the converter UI."""
+    source_name = get_source_str_from_type(source) if isinstance(source, SourceType) else source
+    loaders = {
+        "soma": (load_bvh, False),
+        "smplx": (load_smplx_npz, True),
+        "lafan1": (load_lafan1_bvh, True),
+    }
+    try:
+        loader, identity = loaders[source_name]
+    except KeyError:
+        raise ValueError(f"Unknown source type: [{source_name}]") from None
+    return MotionSourceDescriptor(_SOURCE_EXTENSIONS[source_name], loader, identity)
 
 
 @dataclass(frozen=True)
 class MotionSourceDescriptor:
-    """File and coordinate conventions for one supported motion source."""
+    """Loader and file conventions for a supported motion dataset."""
 
     extension: str
     load: Callable
     root_transform_is_identity: bool
-
-
-_MOTION_SOURCE_DESCRIPTORS = {
-    "soma": MotionSourceDescriptor(".bvh", load_bvh, False),
-    "smplx": MotionSourceDescriptor(".npz", load_smplx_npz, True),
-    "lafan1": MotionSourceDescriptor(".bvh", load_lafan1_bvh, True),
-}
-
-
-_TARGET_REGISTRY: Dict[str, TargetRobot] = {}
-_EXTERNAL_TARGETS_DISCOVERED = False
-
-
-def register_target(robot: TargetRobot) -> None:
-    """
-    Register a retargeting target robot.
-
-    Args:
-        robot (TargetRobot): The robot description. A duplicate name overwrites
-            the previous registration.
-    """
-    _TARGET_REGISTRY[robot.name] = robot
-
-
-def _g1_mjcf_path() -> Path:
-    import newton
-
-    return newton.utils.download_asset("unitree_g1") / "mjcf/g1_29dof_rev_1_0.xml"
-
-
-def _register_builtin_targets() -> None:
-    configs_dir = io_utils.get_configs_dir
-    register_target(TargetRobot(
-        name='unitree_g1',
-        retargeter_config='unitree_g1/soma_to_g1_retargeter_config.json',
-        get_config_base=configs_dir,
-        get_mjcf_path=_g1_mjcf_path))
-    register_target(TargetRobot(
-        name='dr02',
-        retargeter_config='dr02/soma_to_dr02_retargeter_config.json',
-        get_config_base=configs_dir,
-        get_mjcf_path=lambda: io_utils.get_config_file('dr02', 'mjcf/dr02_robot.xml')))
-
-
-def _discover_external_targets() -> None:
-    """Load external robot packages via the soma_retargeter.targets entry points."""
-    global _EXTERNAL_TARGETS_DISCOVERED
-    if _EXTERNAL_TARGETS_DISCOVERED:
-        return
-    _EXTERNAL_TARGETS_DISCOVERED = True
-    from importlib.metadata import entry_points
-
-    for entry_point in entry_points(group='soma_retargeter.targets'):
-        try:
-            register = entry_point.load()
-            register(register_target, TargetRobot)
-        except Exception as e:
-            print(f"[WARNING]: Failed to load target package [{entry_point.name}]: {e}")
-
-
-def _get_registered_robot(target: str) -> TargetRobot:
-    """
-    Look up a registered robot by name, discovering external packages once.
-
-    Args:
-        target (str): The target robot name.
-
-    Returns:
-        TargetRobot: The registered robot description.
-
-    Raises:
-        ValueError: If the name is not registered.
-    """
-    _register_builtin_targets()
-    _discover_external_targets()
-    try:
-        return _TARGET_REGISTRY[target]
-    except KeyError:
-        allowed = ", ".join(sorted(_TARGET_REGISTRY.keys()))
-        raise ValueError(f"Unknown target type: [{target}]. Allowed values are: {allowed}") from None
-
-
-def get_registered_targets() -> List[str]:
-    """
-    List all registered target robot names (built-in and external packages).
-
-    Returns:
-        list[str]: Sorted target names.
-    """
-    _register_builtin_targets()
-    _discover_external_targets()
-    return sorted(_TARGET_REGISTRY.keys())
-
 
 def get_source_str_from_type(source: SourceType) -> str:
     """
@@ -186,18 +107,6 @@ def get_source_type_from_str(source: str) -> SourceType:
         raise ValueError(f"Unknown source type: [{source}]. Allowed values: {allowed}") from None
 
 
-def motion_source_descriptor(source: str | SourceType) -> MotionSourceDescriptor:
-    """Return the loader, extension, and root-transform policy for a source."""
-
-    source_name = get_source_str_from_type(source) if isinstance(source, SourceType) else source
-    try:
-        return _MOTION_SOURCE_DESCRIPTORS[source_name]
-    except KeyError:
-        allowed = ", ".join(_MOTION_SOURCE_DESCRIPTORS)
-        raise ValueError(
-            f"Unknown source type: [{source_name}]. Allowed values: {allowed}") from None
-
-
 def get_source_model_mesh(source: SourceType, skeleton) -> dict:
     """
     Retrieve model mesh for a given source type.
@@ -214,88 +123,163 @@ def get_source_model_mesh(source: SourceType, skeleton) -> dict:
     """
     if source == SourceType.SOMA:
         return usd_utils.load_skeletal_mesh_from_usd(
-            str(io_utils.get_config_file('soma', 'soma_base_skel_minimal.usd')),
+            str(utils.get_asset_file('soma', 'soma_base_skel_minimal.usd')),
             skeleton,
             '/OUTPUT/c_geometry_grp',
             '/OUTPUT/c_skeleton_grp/Root')
 
-    if source == SourceType.SMPLX:
-        # No skeletal mesh is bundled for the SMPL-X source; the pipeline
-        # renders skeleton lines only.
-        return None
-
-    if source == SourceType.LAFAN1:
-        # LAFAN1 is distributed as a skeleton animation without a mesh.
+    if source in (SourceType.SMPLX, SourceType.LAFAN1):
         return None
 
     raise ValueError(f"Unknown source type {source}.")
 
-
-def get_retargeter_config(source: SourceType, target: str) -> dict:
+def get_source_zero_pose_asset_path(source:SourceType):
     """
-    Load the retargeter configuration between a specific source and target.
+    Retrieve an authored zero-pose asset path, if the source provides one.
 
     Args:
-        source (SourceType): The source type.
-        target (str): The target robot name registered by a target package.
+        source (SourceType): The source type for which the zero pose asset path should be retrieved.
 
     Returns:
-        dict: The loaded JSON configuration for the retargeter.
+        str | None: Asset path, or None when initialization uses the input pose.
 
     Raises:
-        ValueError: If the source or target type is not supported.
+        ValueError: If the source type is not recognized.
     """
-    robot = _get_registered_robot(target)
-    source_name = get_source_str_from_type(source)
-    explicit_configs = robot.retargeter_configs or {}
-    if source_name in explicit_configs:
-        config_path = robot.get_config_base() / explicit_configs[source_name]
-    elif source == SourceType.SOMA:
-        config_path = robot.get_config_base() / robot.retargeter_config
-    elif source == SourceType.SMPLX:
-        # Robots register their SOMA retargeter config; SMPL-X configs live
-        # next to them under the smplx_to_* name.
-        soma_path = robot.get_config_base() / robot.retargeter_config
-        config_path = soma_path.with_name(
-            soma_path.name.replace("soma_to_", "smplx_to_"))
-        if not config_path.exists():
-            raise FileNotFoundError(
-                f"No SMPL-X retargeter config for target [{target}]: "
-                f"expected [{config_path}].")
+    if source == SourceType.SOMA:
+        return str(utils.get_asset_file('soma', 'soma_zero_frame0.bvh'))
+
+    if source in (SourceType.SMPLX, SourceType.LAFAN1):
+        return None
+
+    raise ValueError(f"Unknown source type {source}.")
+
+def get_source_contact_detection_config_path(source:SourceType):
+    """
+    Retrieve the contact detection configuration path for a given source type.
+
+    Args:
+        source (SourceType): The source type for which the contact detection config path should be retrieved.
+    """
+
+    if source == SourceType.SOMA:
+        return str(utils.get_asset_file('soma', 'contact_processing/soma_contact_config.json'))
+
+    if source == SourceType.LAFAN1:
+        return str(utils.get_asset_file('lafan1', 'contact_config.json'))
+
+    if source == SourceType.SMPLX:
+        return str(utils.get_asset_file('smplx', 'contact_config.json'))
+
+    raise ValueError(f"Unknown source type {source}.")
+
+def get_target_asset_path(target: str) -> dict:
+    """Return asset-path dict (``urdf_path`` or ``xml_path`` key) for *target*.
+
+    The manifest ``desc`` may also contain ``urdf_offset`` (a precomputed
+    ground offset) which is forwarded to the caller.
+    """
+    entry = _robot_registry.get(target)
+    desc = entry.desc
+    result: dict = {}
+    if "newton_asset" in desc:
+        base = str(newton.utils.download_asset(desc["newton_asset"]))
+        if "xml_path" in desc:
+            result["xml_path"] = os.path.join(base, desc["xml_path"])
+        elif "urdf_path" in desc:
+            result["urdf_path"] = os.path.join(base, desc["urdf_path"])
     else:
+        if "xml_path" in desc:
+            result["xml_path"] = os.path.join(entry.manifest_dir, desc["xml_path"])
+        elif "urdf_path" in desc:
+            result["urdf_path"] = os.path.join(entry.manifest_dir, desc["urdf_path"])
+    if not result:
+        raise ValueError(f"Manifest for '{target}' must specify 'urdf_path' or 'xml_path' in 'desc'")
+    if "urdf_offset" in desc:
+        result["urdf_offset"] = desc["urdf_offset"]
+    return result
+
+def create_robot_builder(target: str) -> newton.ModelBuilder:
+    # For URDFs without a baked ground offset, finalize once to measure and re-build with the correct Z lift
+    asset_info = get_target_asset_path(target)
+    builder = newton.ModelBuilder()
+    if 'xml_path' in asset_info:
+        builder.add_mjcf(asset_info['xml_path'])
+    elif 'urdf_path' in asset_info:
+        urdf_path = asset_info['urdf_path']
+        if 'urdf_offset' in asset_info:
+            offset = asset_info['urdf_offset']
+            builder.add_urdf(
+                urdf_path,
+                floating=True,
+                xform=wp.transform(wp.vec3(0.0, 0.0, offset), wp.quat_identity()))
+        else:
+            builder.add_urdf(urdf_path, floating=True)
+            offset = newton_utils.compute_ground_offset(builder)
+            final = newton.ModelBuilder()
+            final.add_builder(builder, xform=wp.transform(wp.vec3(0.0, 0.0, offset), wp.quat_identity()))
+            return final
+    else:
+        raise ValueError(f"Invalid asset info for target {target}: {asset_info}")
+    return builder
+
+
+def get_retargeter_config(source: str, target: str) -> dict:
+    """Load the retargeter config JSON for a *(source, target)* pair."""
+    entry = _robot_registry.get(target)
+    source = get_source_str_from_type(source) if isinstance(source, SourceType) else source
+    rel_path = get_source_config_path(entry, source)
+    if rel_path is None:
+        available = ", ".join(sorted(entry.retarget_configs.keys()))
         raise ValueError(
-            f"Source [{source_name}] is not configured for target [{target}].")
-    return io_utils.load_json(config_path)
+            f"No retargeter config for source [{source}] and target [{target}]. "
+            f"Available sources: {available}")
+    return utils.load_json(os.path.join(entry.manifest_dir, rel_path))
 
+def resolve_post_processing(retargeter_config: dict, source_type: SourceType, asset_root: str) -> dict | None:
+    """Load and merge post-processing configs into one dict for NewtonPipeline.
 
-def resolve_config_path(relative: str):
+    When ``post_processing`` is present, ``robot_config`` is always required (it
+    supplies ``limb_stabilizer`` and ``contact_correction`` settings).
+    Contact detection config is loaded from the source type properties.
+
+    Returns None when ``post_processing`` is not set.
     """
-    Resolve a config-relative path, dispatching registered robots to their packages.
+    pp = retargeter_config.get("post_processing")
+    if pp is None:
+        return None
 
-    Args:
-        relative (str): Path relative to a configs root, using the '<robot>/...'
-            convention for registered target packages.
+    robot_rel = pp.get("robot_config")
+    if not robot_rel:
+        raise ValueError("post_processing requires a non-empty 'robot_config' path")
+    robot_data = utils.load_json(os.path.join(asset_root, robot_rel))
 
-    Returns:
-        Path to the configuration file.
-    """
-    top = str(relative).split('/')[0]
-    if top in _TARGET_REGISTRY:
-        return _TARGET_REGISTRY[top].get_config_base() / relative
-    return io_utils.get_config_file(relative)
+    merged: dict = {}
 
+    contact_config_path = get_source_contact_detection_config_path(source_type)
+    if contact_config_path:
+        source_data = utils.load_json(contact_config_path)
 
-def get_robot_mjcf_path(target: str) -> Path:
-    """
-    Retrieve the MJCF model path for a given target robot.
+        merged = {k: v for k, v in source_data.items() if k not in ("foot_landmarks_path", "foot_landmarks")}
 
-    Args:
-        target (str): The target robot name.
+        if "foot_landmarks" in source_data:
+            merged["foot_landmarks"] = source_data["foot_landmarks"]
+        else:
+            lm_rel = source_data.get("foot_landmarks_path")
+            if lm_rel:
+                src_dir = os.path.dirname(contact_config_path)
+                merged["foot_landmarks_path"] = os.path.normpath(os.path.join(src_dir, lm_rel))
 
-    Returns:
-        Path to the robot MJCF file.
+    # Fall back to top-level keys for backward compat with the old flat robot config format
+    cc = robot_data.get("contact_correction", robot_data)
+    bt = cc.get("transition_frames")
+    if bt is not None:
+        merged["blend_transition_frames"] = bt
+    for key in ("propagation_ratio", "rotation_propagation_ratio", "enable_flatten_foot_plant", "sole_normal_local"):
+        if key in cc:
+            merged[key] = cc[key]
 
-    Raises:
-        ValueError: If the target robot type is not registered.
-    """
-    return _get_registered_robot(target).get_mjcf_path()
+    if "limb_stabilizer" in robot_data:
+        merged["limb_stabilizer"] = robot_data["limb_stabilizer"]
+
+    return merged
