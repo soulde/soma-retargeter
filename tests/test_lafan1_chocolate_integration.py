@@ -6,9 +6,9 @@ import warp as wp
 
 from app.csv_to_npz import convert_csv_to_npz
 from soma_retargeter.animation.animation_buffer import AnimationBuffer
-from soma_retargeter.assets import csv as csv_utils
 from soma_retargeter.assets.lafan1 import load_lafan1_bvh
-from soma_retargeter.pipelines.newton_pipeline import NewtonPipeline
+from soma_retargeter.io import csv as csv_utils
+from soma_retargeter.pipelines.soma_retargeting_pipeline import SomaRetargetingPipeline
 
 
 DATA_ROOT = "/home/jvwei/datasets/lafan1"
@@ -35,7 +35,7 @@ def test_lafan1_chocolate_short_clip_retargets_and_exports(filename, tmp_path):
         source.local_transforms[start:start + frame_count].copy(),
     )
 
-    pipeline = NewtonPipeline(skeleton, "lafan1", "chocolate")
+    pipeline = SomaRetargetingPipeline(skeleton, "lafan1", "chocolate")
     pipeline.add_input_motions([short], [wp.transform_identity()], True)
     assert np.max(np.std(pipeline.input_targets[0][:, :, :3], axis=0)) > 1e-4
     output = pipeline.execute()[0]
@@ -58,7 +58,7 @@ def test_lafan1_chocolate_short_clip_retargets_and_exports(filename, tmp_path):
     csv_path = tmp_path / f"{filename[:-4]}.csv"
     npz_path = tmp_path / f"{filename[:-4]}.npz"
     csv_utils.save_csv(
-        csv_path, output, csv_utils.get_csv_config_for_target("chocolate"))
+        csv_path, [], output, csv_config=csv_utils.get_csv_config_for_target("chocolate"))
     convert_csv_to_npz(
         csv_path, npz_path, "chocolate",
         input_fps=source.sample_rate, output_fps=50.0,

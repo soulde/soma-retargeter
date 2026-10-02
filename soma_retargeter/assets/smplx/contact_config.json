@@ -1,0 +1,4 @@
+{
+    "joint_names": ["left_foot", "right_foot"],
+    "foot_channel_map": {"0": 0, "1": 1}
+}

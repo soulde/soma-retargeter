@@ -12,9 +12,9 @@ The rest skeleton (joint names, parents, zero-pose offsets) is read from
 SMPL-X neutral body model with ``scripts/export_smplx_skeleton.py``. No smplx
 or torch dependency is needed at runtime.
 
-SMPL-X data is Y-up with forward +Z; soma-retargeter skeletons are Z-up with
-forward -Y. A -90 degree rotation about X maps one to the other, so it is
-baked into the root joint of both the rest pose and every animation frame.
+SMPL-X data is Y-up with forward +Z. Its own 22-joint skeleton and animation
+are expressed in the pipeline's Z-up, forward -Y coordinate frame by rotating
+the root; the joint hierarchy remains SMPL-X.
 """
 
 import json
@@ -24,7 +24,7 @@ import numpy as np
 import warp as wp
 from scipy.spatial.transform import Rotation as R
 
-import soma_retargeter.utils.io_utils as io_utils
+import soma_retargeter.io.utils as io_utils
 from soma_retargeter.animation.animation_buffer import AnimationBuffer
 from soma_retargeter.animation.skeleton import Skeleton
 
@@ -131,7 +131,7 @@ def detect_up_axis_for_files(npz_files) -> str:
     return votes.most_common(1)[0][0]
 
 
-def load_smplx_npz(npz_file: str, input_skeleton: Skeleton | None = None):
+def load_smplx_npz(npz_file: str):
     """
     Load an AMASS/SMPL-X animation file and create ``Skeleton`` and
     ``AnimationBuffer`` objects.
@@ -140,12 +140,9 @@ def load_smplx_npz(npz_file: str, input_skeleton: Skeleton | None = None):
         npz_file: Path to the SMPL-X ``.npz`` file. Supports both the split
             stageii convention (``root_orient``, ``pose_body``) and the raw
             AMASS convention (single ``poses`` array).
-        input_skeleton: Optional skeleton to conform the animation to. Because
-            all SMPL-X clips share the same rest skeleton, this must be an
-            SMPL-X skeleton; passing ``None`` builds one from the exported JSON.
-
     Returns:
-        tuple (Skeleton, AnimationBuffer)
+        tuple (Skeleton, AnimationBuffer) on the native 22-joint SMPL-X body
+        skeleton. No retargeting or skeleton conversion is performed here.
     """
     data = np.load(npz_file, allow_pickle=True)
 
@@ -182,15 +179,9 @@ def load_smplx_npz(npz_file: str, input_skeleton: Skeleton | None = None):
     up_axis = detect_up_axis(root_orient)
     up_rotation = AXIS_ROTATIONS[up_axis]
 
-    if input_skeleton is not None:
-        skeleton = input_skeleton
-        if skeleton.num_joints != NUM_BODY_JOINTS:
-            raise ValueError(
-                f"[ERROR]: SMPL-X animation requires a {NUM_BODY_JOINTS}-joint skeleton, "
-                f"got {skeleton.num_joints} joints."
-            )
-    else:
-        skeleton = create_smplx_skeleton(up_axis=up_axis)
+    # Keep the source's own body skeleton. Robot mapping is handled by the
+    # selected source-to-robot config in the upstream retargeting pipeline.
+    skeleton = create_smplx_skeleton(up_axis=up_axis)
 
     # reference_local_transforms is an (num_joints, 7) float32 array of
     # [px, py, pz, qx, qy, qz, qw]; non-root rest rotations are identity.
