@@ -5,7 +5,7 @@ import subprocess
 
 import numpy as np
 
-from soma_retargeter.assets.csv import get_csv_config_for_target
+from soma_retargeter.io.csv import get_csv_config_for_target
 
 
 def test_standard_regeneration_exports_original_120hz_csv_directly_to_50hz(tmp_path):

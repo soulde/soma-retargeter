@@ -10,7 +10,7 @@ import numpy as np
 import newton
 import warp as wp
 
-from soma_retargeter.assets.csv import get_csv_config_for_target, load_csv
+from soma_retargeter.io.csv import get_csv_config_for_target, load_csv
 from soma_retargeter.assets.beyondmimic_npz import (
     finite_difference, quaternion_angular_velocity, resample_motion, save_npz,
 )
@@ -26,8 +26,7 @@ def convert_csv_to_npz(csv_path: str | Path, npz_path: str | Path, robot_type: s
     frames = np.asarray(buffer.data, dtype=np.float32)
     frames = resample_motion(frames, input_fps, output_fps)
 
-    builder = newton.ModelBuilder()
-    builder.add_mjcf(str(pipeline_utils.get_robot_mjcf_path(robot_type)))
+    builder = pipeline_utils.create_robot_builder(robot_type)
     model = builder.finalize()
     if frames.shape[1] != model.joint_coord_count:
         raise ValueError(f"CSV has {frames.shape[1] - 7} joints, but model expects {model.joint_coord_count - 7}")
